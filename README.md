@@ -6,7 +6,7 @@ The program compares the two .txt file, and make changes based on this to the si
 
 
 Features:
-1. Compare old and new fiel of localization, add/edit/delete strings in new version
+1. Compare old and new file of localization, add/edit/delete strings in new version
 2. Add comments for convenience of tracking changes
 3. Download original localization project from notabenoid
 4. Replace ID's
