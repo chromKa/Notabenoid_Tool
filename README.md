@@ -1,14 +1,16 @@
-Notabenoid Tool is intended for updating and editing the localization of the program or game after the update. 
-This will eliminate the need to add each line of the updated localization to the site manually. 
-The program compares the two .txt file, and make changes based on this to the site.
+Программа создана @erdem1999erdem и предназначена для обновления оригинального текста на нотабеноиде. 
+В основном требуется при обновлениях игр или программ. 
+Позволяет экономить уйму времени и не придётся добавлять и вносить изменения на нотабеноиде в каждой изменённой строке вручную. 
+Всё осуществляется автоматически.
 
 ![Снимок экрана 2024-06-28 104057](https://github.com/chromKa/Notabenoid_Tool/assets/19959081/4f343d75-6f21-45f9-80ec-54f8b576df58)
 
 
-Features:
-1. Compare old and new file of localization, add/edit/delete strings in new version
-2. Add comments for convenience of tracking changes
-3. Download original localization project from notabenoid
-4. Replace ID's
+Возможности:
 
-Created by [@erdem](https://github.com/erdem1999erdem)
+1. Добавляет/редактирует/удаляет строки, сравнивая 2 файла локализации (старый и новый). Учитывает удалённые строки из нового файла локализации и обновляет ID последующих строк, дабы не было разрыва и ошибки.
+2. Добавляет комментарии к новым строкам для удобства отслеживания обновлений и редактирования перевода на нотабеноиде.
+3. Обновление ID строк по запросу
+4. Скачивание оригинального текста локализации с нотабеноида.
+
+Создано [@erdem](https://github.com/erdem1999erdem)
