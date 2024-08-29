@@ -1,0 +1,8 @@
+<RCC>
+  <qresource prefix="d">
+    <file>download.png</file>
+    <file>Untitled-1.ico</file>
+    <file>Untitled-12.png</file>
+    <file>DINPro-CondensedMedium.ttf</file>
+  </qresource>
+</RCC>
