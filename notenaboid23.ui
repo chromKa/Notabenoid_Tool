@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>521</width>
+    <width>519</width>
     <height>705</height>
    </rect>
   </property>
@@ -37,7 +37,64 @@ color: rgb(247, 247, 247);</string>
     </size>
    </property>
    <layout class="QGridLayout" name="gridLayout">
-    <item row="6" column="0" colspan="2">
+    <item row="3" column="0" alignment="Qt::AlignLeft">
+     <widget class="QLineEdit" name="passwordText">
+      <property name="maximumSize">
+       <size>
+        <width>70</width>
+        <height>16777215</height>
+       </size>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>10</pointsize>
+       </font>
+      </property>
+      <property name="text">
+       <string>Пароль:</string>
+      </property>
+      <property name="frame">
+       <bool>false</bool>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+      </property>
+      <property name="readOnly">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+    <item row="1" column="0" alignment="Qt::AlignLeft">
+     <widget class="QLineEdit" name="loginText">
+      <property name="maximumSize">
+       <size>
+        <width>70</width>
+        <height>16777215</height>
+       </size>
+      </property>
+      <property name="font">
+       <font>
+        <pointsize>10</pointsize>
+       </font>
+      </property>
+      <property name="layoutDirection">
+       <enum>Qt::LeftToRight</enum>
+      </property>
+      <property name="text">
+       <string>Логин:</string>
+      </property>
+      <property name="frame">
+       <bool>false</bool>
+      </property>
+      <property name="alignment">
+       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+      </property>
+      <property name="readOnly">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+    <item row="11" column="0" colspan="3">
      <widget class="QTabWidget" name="tabWidget">
       <property name="enabled">
        <bool>true</bool>
@@ -57,88 +114,13 @@ alternate-background-color: rgb(0, 255, 127);</string>
       </property>
       <widget class="QWidget" name="tabAdd">
        <property name="styleSheet">
-        <string notr="true">
-</string>
+        <string notr="true"/>
        </property>
        <attribute name="title">
-        <string>Add Original</string>
+        <string>Добавить оригинал</string>
        </attribute>
        <layout class="QGridLayout" name="gridLayout_5">
-        <item row="3" column="1">
-         <widget class="QLineEdit" name="fileNameNew">
-          <property name="enabled">
-           <bool>true</bool>
-          </property>
-          <property name="styleSheet">
-           <string notr="true">background-color: rgb(23, 23, 23);</string>
-          </property>
-          <property name="text">
-           <string/>
-          </property>
-          <property name="frame">
-           <bool>true</bool>
-          </property>
-          <property name="readOnly">
-           <bool>false</bool>
-          </property>
-          <property name="placeholderText">
-           <string>New file</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="1">
-         <widget class="QLineEdit" name="fileNameOld">
-          <property name="mouseTracking">
-           <bool>true</bool>
-          </property>
-          <property name="styleSheet">
-           <string notr="true">background-color: rgb(23, 23, 23);</string>
-          </property>
-          <property name="text">
-           <string/>
-          </property>
-          <property name="frame">
-           <bool>true</bool>
-          </property>
-          <property name="readOnly">
-           <bool>false</bool>
-          </property>
-          <property name="placeholderText">
-           <string>Old file</string>
-          </property>
-         </widget>
-        </item>
-        <item row="5" column="1" alignment="Qt::AlignLeft">
-         <widget class="QLineEdit" name="comment">
-          <property name="minimumSize">
-           <size>
-            <width>284</width>
-            <height>0</height>
-           </size>
-          </property>
-          <property name="styleSheet">
-           <string notr="true">background-color: rgb(23, 23, 23);</string>
-          </property>
-          <property name="placeholderText">
-           <string>Comment</string>
-          </property>
-         </widget>
-        </item>
-        <item row="1" column="0">
-         <widget class="QPushButton" name="btnBrowseOld">
-          <property name="text">
-           <string>Select file</string>
-          </property>
-         </widget>
-        </item>
-        <item row="5" column="0">
-         <widget class="QPushButton" name="btnStartAdd">
-          <property name="text">
-           <string>Start</string>
-          </property>
-         </widget>
-        </item>
-        <item row="6" column="0" colspan="2">
+        <item row="8" column="0" colspan="2">
          <widget class="QTextEdit" name="logBoxAdd">
           <property name="font">
            <font>
@@ -166,10 +148,103 @@ p, li { white-space: pre-wrap; }
           </property>
          </widget>
         </item>
+        <item row="6" column="0">
+         <widget class="QPushButton" name="btnStartAdd">
+          <property name="text">
+           <string>Начать</string>
+          </property>
+         </widget>
+        </item>
         <item row="3" column="0">
          <widget class="QPushButton" name="btnBrowseNew">
           <property name="text">
-           <string>Select file</string>
+           <string>Выбрать</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QLineEdit" name="fileNameNew">
+          <property name="enabled">
+           <bool>true</bool>
+          </property>
+          <property name="styleSheet">
+           <string notr="true">background-color: rgb(23, 23, 23);</string>
+          </property>
+          <property name="text">
+           <string/>
+          </property>
+          <property name="frame">
+           <bool>true</bool>
+          </property>
+          <property name="readOnly">
+           <bool>false</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Новый файл оригинала</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QLineEdit" name="fileNameOld">
+          <property name="mouseTracking">
+           <bool>true</bool>
+          </property>
+          <property name="styleSheet">
+           <string notr="true">background-color: rgb(23, 23, 23);</string>
+          </property>
+          <property name="text">
+           <string/>
+          </property>
+          <property name="frame">
+           <bool>true</bool>
+          </property>
+          <property name="readOnly">
+           <bool>false</bool>
+          </property>
+          <property name="placeholderText">
+           <string>Файл оригинала с сайта</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QPushButton" name="btnBrowseOld">
+          <property name="text">
+           <string>Выбрать </string>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="QLineEdit" name="comment">
+          <property name="minimumSize">
+           <size>
+            <width>284</width>
+            <height>0</height>
+           </size>
+          </property>
+          <property name="styleSheet">
+           <string notr="true">background-color: rgb(23, 23, 23);</string>
+          </property>
+          <property name="placeholderText">
+           <string>Комментарий</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="0" colspan="2">
+         <widget class="QRadioButton" name="logBox">
+          <property name="text">
+           <string>Сравнить файлы без замены на сайте</string>
+          </property>
+          <property name="checkable">
+           <bool>true</bool>
+          </property>
+          <property name="checked">
+           <bool>false</bool>
+          </property>
+          <property name="autoRepeat">
+           <bool>true</bool>
+          </property>
+          <property name="autoExclusive">
+           <bool>false</bool>
           </property>
          </widget>
         </item>
@@ -177,7 +252,7 @@ p, li { white-space: pre-wrap; }
       </widget>
       <widget class="QWidget" name="tabRefresh">
        <attribute name="title">
-        <string>Refresh IDs</string>
+        <string>Обновить ID</string>
        </attribute>
        <layout class="QGridLayout" name="gridLayout_2">
         <item row="2" column="0">
@@ -198,7 +273,7 @@ p, li { white-space: pre-wrap; }
            </size>
           </property>
           <property name="text">
-           <string>Start</string>
+           <string>Начать</string>
           </property>
          </widget>
         </item>
@@ -216,7 +291,7 @@ p, li { white-space: pre-wrap; }
            </font>
           </property>
           <property name="text">
-           <string>Missing line number</string>
+           <string>Пропущенный ID</string>
           </property>
           <property name="frame">
            <bool>false</bool>
@@ -287,7 +362,7 @@ p, li { white-space: pre-wrap; }
       </widget>
       <widget class="QWidget" name="tab">
        <attribute name="title">
-        <string>Download Text</string>
+        <string>Скачать текст</string>
        </attribute>
        <layout class="QGridLayout" name="gridLayout_3">
         <item row="2" column="1">
@@ -315,7 +390,7 @@ p, li { white-space: pre-wrap; }
            </size>
           </property>
           <property name="text">
-           <string>Start</string>
+           <string>Начать</string>
           </property>
          </widget>
         </item>
@@ -332,12 +407,12 @@ p, li { white-space: pre-wrap; }
           </property>
           <item>
            <property name="text">
-            <string>Original</string>
+            <string>Оригинал</string>
            </property>
           </item>
           <item>
            <property name="text">
-            <string>Translated</string>
+            <string>Перевод</string>
            </property>
           </item>
          </widget>
@@ -376,7 +451,7 @@ p, li { white-space: pre-wrap; }
            <bool>true</bool>
           </property>
           <property name="text">
-           <string>Insert a fragment of the original</string>
+           <string>Заменять пустые строки оригиналом</string>
           </property>
           <property name="checked">
            <bool>true</bool>
@@ -396,7 +471,7 @@ p, li { white-space: pre-wrap; }
         <string notr="true"/>
        </property>
        <attribute name="title">
-        <string>Replace</string>
+        <string>Заменить</string>
        </attribute>
        <layout class="QGridLayout" name="gridLayout_9">
         <item row="8" column="4">
@@ -405,7 +480,7 @@ p, li { white-space: pre-wrap; }
            <string notr="true"/>
           </property>
           <property name="text">
-           <string>Replacement text:</string>
+           <string>Текст для замены:</string>
           </property>
           <property name="frame">
            <bool>false</bool>
@@ -424,7 +499,7 @@ p, li { white-space: pre-wrap; }
            <string notr="true"/>
           </property>
           <property name="text">
-           <string>Text:</string>
+           <string>Текст на сайте:</string>
           </property>
           <property name="frame">
            <bool>false</bool>
@@ -465,7 +540,7 @@ p, li { white-space: pre-wrap; }
            </size>
           </property>
           <property name="text">
-           <string>Start</string>
+           <string>Начать</string>
           </property>
          </widget>
         </item>
@@ -482,7 +557,7 @@ p, li { white-space: pre-wrap; }
         <item row="1" column="1">
          <widget class="QRadioButton" name="radioButton_replace">
           <property name="text">
-           <string>Find and Replace entire lines</string>
+           <string>Только целые строки</string>
           </property>
           <property name="checked">
            <bool>true</bool>
@@ -540,16 +615,32 @@ p, li { white-space: pre-wrap; }
           </property>
           <item>
            <property name="text">
-            <string>Translated</string>
+            <string>Перевод</string>
            </property>
           </item>
+         </widget>
+        </item>
+        <item row="0" column="4">
+         <widget class="QLineEdit" name="lineEdit_repl">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="text">
+           <string>Url перевода:</string>
+          </property>
+          <property name="frame">
+           <bool>false</bool>
+          </property>
          </widget>
         </item>
        </layout>
       </widget>
       <widget class="QWidget" name="tab_2">
        <attribute name="title">
-        <string>Help</string>
+        <string>Помощь</string>
        </attribute>
        <layout class="QGridLayout" name="gridLayout_4">
         <item row="0" column="0">
@@ -589,25 +680,6 @@ p, li { white-space: pre-wrap; }
       </widget>
      </widget>
     </item>
-    <item row="4" column="1" alignment="Qt::AlignLeft">
-     <widget class="QLineEdit" name="urlBook">
-      <property name="enabled">
-       <bool>true</bool>
-      </property>
-      <property name="minimumSize">
-       <size>
-        <width>316</width>
-        <height>0</height>
-       </size>
-      </property>
-      <property name="styleSheet">
-       <string notr="true">background-color: rgb(23, 23, 23);</string>
-      </property>
-      <property name="text">
-       <string/>
-      </property>
-     </widget>
-    </item>
     <item row="4" column="0">
      <widget class="QLineEdit" name="urlBookText">
       <property name="maximumSize">
@@ -622,7 +694,7 @@ p, li { white-space: pre-wrap; }
        </font>
       </property>
       <property name="text">
-       <string>Url book:</string>
+       <string>Url главы:</string>
       </property>
       <property name="frame">
        <bool>false</bool>
@@ -635,11 +707,17 @@ p, li { white-space: pre-wrap; }
       </property>
      </widget>
     </item>
-    <item row="3" column="1" alignment="Qt::AlignLeft">
+    <item row="3" column="1">
      <widget class="QLineEdit" name="password">
       <property name="enabled">
        <bool>true</bool>
       </property>
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
       <property name="minimumSize">
        <size>
         <width>316</width>
@@ -652,70 +730,22 @@ p, li { white-space: pre-wrap; }
       <property name="text">
        <string/>
       </property>
-     </widget>
-    </item>
-    <item row="1" column="0" alignment="Qt::AlignLeft">
-     <widget class="QLineEdit" name="loginText">
-      <property name="maximumSize">
-       <size>
-        <width>70</width>
-        <height>16777215</height>
-       </size>
-      </property>
-      <property name="font">
-       <font>
-        <pointsize>10</pointsize>
-       </font>
-      </property>
-      <property name="layoutDirection">
-       <enum>Qt::LeftToRight</enum>
-      </property>
-      <property name="text">
-       <string>Login:</string>
-      </property>
-      <property name="frame">
-       <bool>false</bool>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-      </property>
-      <property name="readOnly">
-       <bool>true</bool>
+      <property name="echoMode">
+       <enum>QLineEdit::PasswordEchoOnEdit</enum>
       </property>
      </widget>
     </item>
-    <item row="3" column="0" alignment="Qt::AlignLeft">
-     <widget class="QLineEdit" name="passwordText">
-      <property name="maximumSize">
-       <size>
-        <width>70</width>
-        <height>16777215</height>
-       </size>
-      </property>
-      <property name="font">
-       <font>
-        <pointsize>10</pointsize>
-       </font>
-      </property>
-      <property name="text">
-       <string>Password:</string>
-      </property>
-      <property name="frame">
-       <bool>false</bool>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-      </property>
-      <property name="readOnly">
-       <bool>true</bool>
-      </property>
-     </widget>
-    </item>
-    <item row="1" column="1" alignment="Qt::AlignLeft">
+    <item row="1" column="1">
      <widget class="QLineEdit" name="login">
       <property name="enabled">
        <bool>true</bool>
       </property>
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
       <property name="minimumSize">
        <size>
         <width>316</width>
@@ -730,16 +760,47 @@ p, li { white-space: pre-wrap; }
       </property>
      </widget>
     </item>
-    <item row="5" column="0">
-     <widget class="QRadioButton" name="logBox">
-      <property name="text">
-       <string>Only log</string>
-      </property>
-      <property name="checkable">
+    <item row="4" column="1">
+     <widget class="QLineEdit" name="urlBook">
+      <property name="enabled">
        <bool>true</bool>
       </property>
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
+      <property name="minimumSize">
+       <size>
+        <width>316</width>
+        <height>0</height>
+       </size>
+      </property>
+      <property name="styleSheet">
+       <string notr="true">background-color: rgb(23, 23, 23);</string>
+      </property>
+      <property name="text">
+       <string/>
+      </property>
+     </widget>
+    </item>
+    <item row="5" column="1">
+     <widget class="QRadioButton" name="radioButton">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
+      <property name="styleSheet">
+       <string notr="true"/>
+      </property>
+      <property name="text">
+       <string>Сохранить логин и пароль</string>
+      </property>
       <property name="checked">
-       <bool>false</bool>
+       <bool>true</bool>
       </property>
       <property name="autoRepeat">
        <bool>true</bool>
@@ -756,20 +817,20 @@ p, li { white-space: pre-wrap; }
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>521</width>
+     <width>519</width>
      <height>25</height>
     </rect>
    </property>
    <widget class="QMenu" name="menuFile">
     <property name="title">
-     <string>File</string>
+     <string>Программа</string>
     </property>
     <addaction name="actionRestart"/>
     <addaction name="actionQuit"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
     <property name="title">
-     <string>Help</string>
+     <string>Сайт</string>
     </property>
     <addaction name="actionnotabenoid_org"/>
    </widget>
@@ -793,12 +854,12 @@ p, li { white-space: pre-wrap; }
   </action>
   <action name="actionQuit">
    <property name="text">
-    <string>Quit</string>
+    <string>Закрыть</string>
    </property>
   </action>
   <action name="actionRestart">
    <property name="text">
-    <string>Restart</string>
+    <string>Перезапустить</string>
    </property>
   </action>
   <action name="actionAdd_Text_1_Download_Original_text_binary_orig_from_site_txt_2_Go_to_Add_Original_3_Select_Old_file_binary_orig_from_site_txt_4_Select_New_file_5_Add_text_to_Comment_6_Press_Start_Button">

@@ -652,6 +652,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.setupUi(self)
         # Load the UI from the .ui file
         # self.ui = uic.loadUi('main.ui', self)
+        self.open_login()
+        self.open_pass()
         self.setWindowIcon(QtGui.QIcon(':/d/Untitled-12.png'))
         # Dictionary to store task threads
         self.threads = {}
@@ -665,14 +667,14 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 
         self.logBoxDownload_5.setFontPointSize(13.0)
 
-        self.logBoxDownload_5.setText('Add Text\n 1) Download Original text\n (binary_orig_from_site.txt)\n '
-                                      '2) Go to "Add Original"\n 3) Select "Old file"\n (binary_orig_from_site.txt)\n '
-                                      '4) Select "New file"\n 5) Add text to "Comment"\n 6) Press "Start" Button\n\n'
+        self.logBoxDownload_5.setText('«Добавить оригинал»:\n 1) Скачать текст оригинала с сайта\n (binary_orig_from_site.txt)\n '
+                                      '2) Перейти во вкладку «Добавить оригинал»\n 3) Выбрать «Файл оригинала с сайта»\n (binary_orig_from_site.txt)\n '
+                                      '4) Выбрать «Новый файл оригинала»\n 5) Добавить комментарий\n 6) Нажать кнопку «Начать»\n\n'
 
-                                      "Таблица в Add Original: как использовать\n"
+                                      "Таблица в «Добавить оригинал»:\n"
                                       "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
-                                      "Replace\n"
-                                      "Полностью или частично заменяет идентичный текст во всех главах.")
+                                      "«Заменить»:\n"
+                                      "Заменяет целую строку или её фрагмент во всех главах.")
         # Initialize progress bars
         self.progress_bars = [
             self.progressBarRefresh
@@ -703,7 +705,9 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.replace_text_orig.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.replacement_text_n.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.replace_text_orig_n.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
+        self.lineEdit_repl.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.url_main_text.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
+        self.radioButton.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.radioButton_insert.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.logBoxDownload_5.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 10))
         self.actionRestart.triggered.connect(restart)
@@ -729,6 +733,9 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.menubar.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 11))
         self.lineNumber.setGeometry(QtCore.QRect(140, 17, 61, 20))
         self.logBox.clicked.connect(self.check_log_box)
+
+        self.password.textEdited.connect(self.save_pass)
+        self.login.textEdited.connect(self.save_login)
 
         self.comboBox.currentIndexChanged.connect(self.check_radio)
         self.tabWidget.currentChanged.connect(self.tab_widget3)
@@ -766,6 +773,30 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         # self.logBox.setStyleSheet("QCheckBox::indicator:checked""{""color: rgb(222, 73, 74);""}"
         # "QCheckBox::indicator:unchecked""{""background-color: rgb(72, 73, 74);""}")
         self.menubar.setStyleSheet("background-color: rgb(56, 57, 58);")
+
+    def save_login(self):
+        if self.radioButton.isChecked():
+            with open("./lib/login", "w", encoding='utf-8') as f2:
+                f2.write(self.login.text())
+
+    def save_pass(self):
+        if self.radioButton.isChecked():
+            with open("./lib/pass", "w", encoding='utf-8') as f2:
+                f2.write(self.password.text())
+
+    def open_login(self):
+        if os.path.isfile("./lib/login"):
+            with open("./lib/login", "r", encoding='utf-8') as f2:
+                decoded_text = f2.read()
+                t = str(decoded_text).strip()
+                self.login.setText(t)
+
+    def open_pass(self):
+        if os.path.isfile("./lib/pass"):
+            with open("./lib/pass", "r", encoding='utf-8') as f2:
+                decoded_text = f2.read()
+                t = str(decoded_text).strip()
+                self.password.setText(t)
 
     def tab_widget3(self):
         if self.tabWidget.currentIndex() == 3:
