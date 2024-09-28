@@ -1,21 +1,23 @@
+import datetime
+import difflib
+import math
+import os
 import sys
 import time
-from PyQt6 import QtWidgets, QtGui, QtCore
-from PyQt6.QtGui import QFontDatabase, QFont, QPalette, QColor
-from PyQt6.QtWidgets import QMainWindow, QApplication, QDialog, QTableWidgetItem
-from PyQt6.QtCore import QThread, pyqtSignal
-import notenaboid23 as design
-import math
-from bs4 import BeautifulSoup
-import res2
+import webbrowser
+from multiprocessing import Pool, freeze_support
 from sys import argv, executable
 
+import replace
+import res
+import table
+import main_ui as design
 import requests
-import difflib
-import webbrowser
-import os
-import datetime
-import qn
+from PyQt6 import QtWidgets, QtGui, QtCore
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QFontDatabase, QFont, QPalette, QColor
+from PyQt6.QtWidgets import QMainWindow, QApplication, QDialog, QTableWidgetItem
+from bs4 import BeautifulSoup
 
 session = requests.Session()
 headers = {
@@ -32,6 +34,8 @@ check_tab = 0
 line_number = 1
 file_name_old = ' '
 file_name_new = ' '
+file_name_trans = ' '
+file_name_save = ' '
 f1_data = []
 f2_data = []
 log_box = True
@@ -55,7 +59,7 @@ word_text_orig = ''
 word_replacement = ''
 
 
-class Table(QDialog, qn.Ui_Dialog):
+class Table(QDialog, table.Ui_Dialog):
     def __init__(self):
         super().__init__()
         self.setupUi(self)
@@ -413,16 +417,51 @@ class TaskThread(QThread):
                     if len(rt) // count_url_bar == count_bar_refresh and count_url_bar != 100:
                         self.progress_value.emit(count_url_bar)
                         count_url_bar += 1
+            global file_name_save
+            if not file_name_save:
+                file_name_save = 'binary_orig_from_site.txt'
 
-            with open("binary_orig_from_site.txt", "w", encoding="utf-8") as t:
+            with open(file_name_save, "w", encoding="utf-8") as t:
                 for i in rt:
                     count += 1
                     t.write(str(i) + '\n')
-            self.progress_text.emit("binary_orig_from_site.txt")
+            self.progress_text.emit(file_name_save)
         except Exception as m:
             exc = m
             self.progress_text.emit(str(exc))
             return
+
+    def add_trans(self):
+        try:
+            page_last_number = int(last_page())
+            ids_last_page = create_list_ids(url_book + '?Orig_page=' + str(page_last_number))
+
+            with open(file_name_trans, "r", encoding="utf-8") as f1:
+                all_file_str = f1.readlines()
+            if len(ids_last_page) + 50 * (page_last_number - 1) != len(all_file_str):
+                self.progress_text.emit('different string length:')
+                self.progress_text.emit(
+                    str(len(ids_last_page) + 50 * (page_last_number - 1)) + ' ' + str(len(all_file_str)))
+                return 'error'
+
+            for i in range(page_last_number):
+                url_parce = url_book + '?Orig_page=' + str(i + 1)
+                ids_orig = create_list_ids(url_parce)
+                for id_o in range(len(ids_orig)):
+                    text_add = all_file_str[id_o + 50 * i]
+
+                    data1 = {
+                        'Translation[body]:': text_add,
+                        'ajax': '1',
+                    }
+                    self.progress_text.emit(str(id_o + 50 * i))
+
+                    if text_add != '' and text_add:
+                        session.post(url_book + '/' + ids_orig[id_o] + '/translate', headers=headers, data=data1,
+                                     verify=False)
+        except Exception as exc:
+            self.progress_text.emit(str(exc))
+            return 'error'
 
     def all_str_trans(self):
         try:
@@ -459,114 +498,96 @@ class TaskThread(QThread):
                     if len(rt) // count_url_bar == count_bar_refresh and count_url_bar != 100:
                         self.progress_value.emit(count_url_bar)
                         count_url_bar += 1
-
-            with open("binary_trans_from_site.txt", "w", encoding="utf-8") as t:
+            global file_name_save
+            if not file_name_save:
+                file_name_save = 'binary_trans_from_site.txt'
+            with open(file_name_save, "w", encoding="utf-8") as t:
                 for i in rt:
                     t.write(str(i) + '\n')
-            self.progress_text.emit("binary_trans_from_site.txt")
+            self.progress_text.emit(file_name_save)
         except Exception as m:
             exc = m
             self.progress_text.emit(str(exc))
             return
 
-    def compare_string_trans(self, val, key, name_books, ids_books, id_book, ids_trans, all_str):
+    def compare_string_trans(self, str_translate, id_trans, id_str_original, id_book):
         try:
             if not entire_radio:
-                if word_text_orig in val:
-                    text_repl = val
-                    count_er = 0
+                if word_text_orig in str_translate:
+
+                    text_repl = str_translate
+                    count_replace = 0
                     start_index = 0
+
+                    # count similar
                     for i in range(len(text_repl)):
                         j = text_repl.find(word_text_orig, start_index)
                         if j != -1:
                             start_index = j + 1
-                            count_er += 1
+                            count_replace += 1
 
                     temp_rep = '#replace_temp_placeholder'
                     t = ''
-                    for i in range(count_er):
+                    for i in range(count_replace):
                         t = text_repl.replace(word_text_orig, temp_rep)
-                    for i in range(count_er):
+                    for i in range(count_replace):
                         text_repl = t.replace(temp_rep, word_replacement)
 
-                    check_er = replace_site_text(ids_trans[all_str.index(val)], key, id_book, text_repl)
+                    check_er = replace_site_text(id_trans, id_str_original, id_book, text_repl)
+
                     if check_er == 'error':
                         return check_er
-                    self.progress_text.emit(str(name_books[ids_books.index(id_book)])
-                                            + ' (' + str(id_book) + ') \n' + str(key) + ': '
-                                            + '(' + str(ids_trans[all_str.index(val)]) + ')\n' + str(val)
-                                            + ' => ' + text_repl + '\n')
 
                     return text_repl
             else:
-                if val == word_text_orig:
-                    check_er = replace_site_text(ids_trans[all_str.index(val)], key, id_book, word_replacement)
+                if str_translate == word_text_orig or str_translate.strip() == word_text_orig:
+
+                    check_er = replace_site_text(id_trans, id_str_original, id_book, word_replacement)
+
                     if check_er == 'error':
                         return check_er
-                    self.progress_text.emit(str(name_books[ids_books.index(id_book)])
-                                            + ' (' + str(id_book) + ') \n' + str(key) + ': '
-                                            + '(' + str(ids_trans[all_str.index(val)]) + ')\n' + str(val)
-                                            + ' => ' + word_replacement + '\n')
 
                     return word_replacement
 
         except Exception as exc:
             self.progress_text.emit(str(exc))
-            return 'error'
 
     def replace_text(self):
         try:
+            if not word_text_orig or not word_replacement:
+                return 'error'
             ids_books, name_books = id_books()
+
             if ids_books == 'error':
                 return 'error'
             for id_book in ids_books:
+                data_pool = []
                 url_book_t = url_book_main + '/' + id_book
-                page_last_number = int(last_page_trans(url_book_t))
-                count_line = 0
-                for i in range(page_last_number):
-                    all_str = []
-                    ids_line_origin = {}
-                    url_parce = url_book_t + '?Orig_page=' + str(i + 1)
-                    ids_trans = create_list_ids_trans(url_parce)
-                    if ids_trans == 'error':
-                        return 'error'
-                    page = session.get(url_parce, headers=headers)
-                    if page.status_code != 200:
-                        while page.status_code != 200:
-                            page = session.get(url_parce, headers=headers)
-                    soup = BeautifulSoup(page.text, "html.parser")
+                all_links = get_all_links(url_book_t)
+                for link in all_links:
+                    data_pool.append({link: session})
 
-                    number_chapter = soup.find_all('tbody')[0].findAll('tr')
-                    for im in number_chapter:
-                        count_line += 1
+                with Pool(10) as p:
+                    data = p.map(replace.make_all, data_pool)
 
-                        all_str_dic = []
-                        tt = im.find(class_='t').find_all('p', class_='text')
-
-                        if tt:
-                            for string in tt:
-                                all_str.append(string.get_text().rstrip())
-                                all_str_dic.append(string.get_text().rstrip())
-                        else:
-                            all_str.append('')
-                        ids_line_origin[count_line] = all_str_dic
-                    # print(len(ids_trans), ids_trans)
-                    # print(len(all_str), all_str)
-                    # print(ids_line_origin)
-                    for key in ids_line_origin:
-                        if len(ids_line_origin[key]) > 0:
-                            for val in ids_line_origin[key]:
-                                if word_text_orig in val:
-                                    word_rep = self.compare_string_trans(val, key, name_books, ids_books, id_book,
-                                                                         ids_trans, all_str)
-                                    if word_rep == 'error':
-                                        return word_rep
-                                    all_str[all_str.index(val)] = word_rep
-
-        except Exception as m:
-            exc = m
+                for num_page, dic in enumerate(data):
+                    for num_orig, id_str_original in enumerate(dic):
+                        for dic_translate in dic[id_str_original]:
+                            for key_dic_translate in dic_translate:
+                                word_rep = self.compare_string_trans(dic_translate[key_dic_translate],
+                                                                     key_dic_translate, id_str_original, id_book)
+                                if word_rep == 'error':
+                                    return word_rep
+                                if word_rep:
+                                    self.progress_text.emit(str(name_books[ids_books.index(id_book)])
+                                                            + ' (' + str(id_book) + ') \n' + str(id_str_original)
+                                                            + ':\n'
+                                                            + str(dic_translate[key_dic_translate])
+                                                            + ' => ' + word_rep + '\n')
+                                    print(word_rep)
+        except Exception as exc:
             self.progress_text.emit(str(exc))
-            return
+            return 'error'
 
     def run(self):
         # Emit signal to notify the start of the task
@@ -578,6 +599,8 @@ class TaskThread(QThread):
             self.started.emit(f"Task Download Text **** START.")
         elif check_tab == 3:
             self.started.emit(f"Task Replace Text **** START.")
+        elif check_tab == 4:
+            self.started.emit(f"Task Add Translated Text **** START.")
         global count_text
         count_text = 0
         global count_add
@@ -625,6 +648,10 @@ class TaskThread(QThread):
             check_er = self.replace_text()
             if check_er == 'error':
                 self.progress_text.emit('Error.')
+        elif check_tab == 4:
+            check_er = self.add_trans()
+            if check_er == 'error':
+                self.progress_text.emit('Error.')
 
         global error
         global url_book_main
@@ -644,6 +671,8 @@ class TaskThread(QThread):
             self.finished.emit(f"Task Download Text **** END." + '\n' + t + ' sec')
         elif check_tab == 3:
             self.finished.emit(f"Task Replace Text **** END." + '\n' + t + ' sec')
+        elif check_tab == 4:
+            self.finished.emit(f"Task Add Translated Text **** END." + '\n' + t + ' sec')
 
 
 class MainWindow(QMainWindow, design.Ui_MainWindow):
@@ -667,14 +696,16 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 
         self.logBoxDownload_5.setFontPointSize(13.0)
 
-        self.logBoxDownload_5.setText('«Добавить оригинал»:\n 1) Скачать текст оригинала с сайта\n (binary_orig_from_site.txt)\n '
-                                      '2) Перейти во вкладку «Добавить оригинал»\n 3) Выбрать «Файл оригинала с сайта»\n (binary_orig_from_site.txt)\n '
-                                      '4) Выбрать «Новый файл оригинала»\n 5) Добавить комментарий\n 6) Нажать кнопку «Начать»\n\n'
+        self.logBoxDownload_5.setText(
+            '«Добавить оригинал»:\n 1) Скачать текст оригинала с сайта\n (binary_orig_from_site.txt)\n '
+            '2) Перейти во вкладку «Добавить оригинал»\n 3) Выбрать «Файл оригинала с сайта»\n '
+            '(binary_orig_from_site.txt)\n '
+            '4) Выбрать «Новый файл оригинала»\n 5) Добавить комментарий\n 6) Нажать кнопку «Начать»\n\n'
 
-                                      "Таблица в «Добавить оригинал»:\n"
-                                      "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
-                                      "«Заменить»:\n"
-                                      "Заменяет целую строку или её фрагмент во всех главах.")
+            "Таблица в «Добавить оригинал»:\n"
+            "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
+            "«Заменить»:\n"
+            "Заменяет целую строку или её фрагмент во всех главах.")
         # Initialize progress bars
         self.progress_bars = [
             self.progressBarRefresh
@@ -719,7 +750,13 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.btnStartRefresh.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.btnStartDownload.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.btnStartReplace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.btnBrowseTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.btnStartTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.fileNameTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.logBoxTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.refreshText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.lineEditSave.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.btnBrowseSave.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.loginText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.passwordText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.urlBookText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
@@ -822,33 +859,52 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.btnStartRefresh.setDisabled(self.logBox.isChecked())
         self.btnStartDownload.setDisabled(self.logBox.isChecked())
         self.btnStartReplace.setDisabled(self.logBox.isChecked())
+        self.btnStartTrans.setDisabled(self.logBox.isChecked())
 
         self.btnStartAdd.setDisabled(False)
 
     def file_old_button(self):
         global file_name_old
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", filter="*.txt")
+        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
         if file[0] != '':
             self.fileNameOld.setText(file[0])
             file_name_old = file[0]
 
     def file_new_button(self):
         global file_name_new
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file", filter="*.txt")
-
+        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
         if file[0] != '':
             file_name_new = file[0]
             self.fileNameNew.setText(file[0])
 
+    def file_add_trans(self):
+        global file_name_trans
+        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
+
+        if file[0] != '':
+            file_name_trans = file[0]
+            self.fileNameTrans.setText(file[0])
+
+    def file_save(self):
+        global file_name_save
+        file = QtWidgets.QFileDialog.getSaveFileName(self, "Save file")
+
+        if file[0] != '':
+            file_name_save = file[0]
+            self.lineEditSave.setText(file[0])
+
     def file_signal(self):
         self.btnBrowseOld.clicked.connect(self.file_old_button)
         self.btnBrowseNew.clicked.connect(self.file_new_button)
+        self.btnBrowseTrans.clicked.connect(self.file_add_trans)
+        self.btnBrowseSave.clicked.connect(self.file_save)
 
     def init_signal_slot(self):
         self.btnStartAdd.clicked.connect(self.check_tab_widget)
         self.btnStartRefresh.clicked.connect(self.check_tab_widget)
         self.btnStartDownload.clicked.connect(self.check_tab_widget)
         self.btnStartReplace.clicked.connect(self.check_tab_widget)
+        self.btnStartTrans.clicked.connect(self.check_tab_widget)
 
     def check_tab_widget(self):
         global check_tab
@@ -859,9 +915,15 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         global url_book_main
         global insert_radio
         global entire_radio
+        global file_name_save
+        global file_name_trans
+        global file_name_new
+        global file_name_old
         if self.tabWidget.currentIndex() == 0:
             check_tab = 0
             self.logBoxAdd.clear()
+            file_name_new = self.fileNameNew.text()
+            file_name_old = self.fileNameOld.text()
 
             self.start_task()
         elif self.tabWidget.currentIndex() == 1:
@@ -875,6 +937,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             self.logBoxDownload.clear()
             insert_radio = self.radioButton_insert.isChecked()
             combo_box_index = self.comboBox.currentIndex()
+            file_name_save = self.lineEditSave.text()
             self.start_task()
         elif self.tabWidget.currentIndex() == 3:
             check_tab = 3
@@ -885,7 +948,12 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             word_text_orig = self.replace_text_orig.toPlainText()
             entire_radio = self.radioButton_replace.isChecked()
             word_replacement = self.replacement_text.toPlainText()
-            print(word_text_orig, word_replacement)
+
+            self.start_task()
+        elif self.tabWidget.currentIndex() == 4:
+            check_tab = 4
+            file_name_trans = self.fileNameTrans.text()
+            self.logBoxTrans.clear()
             self.start_task()
 
     # Update status in the list widget
@@ -899,6 +967,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             self.logBoxDownload.append(text)
         elif check_tab == 3:
             self.logBoxReplace.append(text)
+        elif check_tab == 4:
+            self.logBoxTrans.append(text)
 
     # Update progress in the corresponding progress bar
     def update_progress_add(self, value):
@@ -916,6 +986,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             self.btnStartRefresh.setDisabled(not enable)
             self.btnStartDownload.setDisabled(not enable)
             self.btnStartReplace.setDisabled(not enable)
+            self.btnStartTrans.setDisabled(not enable)
         self.logBox.setDisabled(not enable)
 
     def take_text(self):
@@ -1006,32 +1077,39 @@ def log_write(text):
         ...
 
 
-def get_id_trans(id_hash, id_book):
-    try:
-        page = math.ceil(id_hash / 50)
-        url_parce = url_book_main + '/' + id_book + '?Orig_page=' + str(page)
-        list_ids = create_list_ids(url_parce)
-        num_str = math.floor(id_hash - 50 * (page - 1))
+def last_page_replace(url_id_book):
+    page = session.get(url_id_book, headers=headers)
+    soup = BeautifulSoup(page.text, "html.parser")
+    number_chapter = soup.find_all('ul', class_='selectable')
+    np = []
+    for i in number_chapter:
+        np = (i.find_all('a'))
+    if len(np) > 0:
+        return int(np[-1].get_text())
+    else:
+        return 1
 
-        return list_ids[num_str - 1]
-    except Exception:
-        return 'error'
+
+def get_all_links(url_all):
+    num_last = last_page_replace(url_all)
+    links = []
+
+    for i in range(num_last):
+        links.append(url_all + '?Orig_page=' + str(i + 1))
+    return links
 
 
-def replace_site_text(id_line_t, line_origin, id_book, word_repl):
-    id_url_str = get_id_trans(line_origin, id_book)
-    if id_url_str == 'error':
-        return id_url_str
+def replace_site_text(id_line_t, id_str_original, id_book, str_repl):
     data1 = {
-        'Translation[body]:': word_repl,
+        'Translation[body]:': str_repl,
         'ajax': '1',
     }
 
-    result = session.post(url_book_main + '/' + id_book + '/' + id_url_str + '/translate?tr_id=' + id_line_t,
+    result = session.post(url_book_main + '/' + id_book + '/' + id_str_original + '/translate?tr_id=' + id_line_t,
                           headers=headers,
                           data=data1, verify=False)
     if result.status_code == requests.codes.ok:
-        return
+        return '200'
     else:
         return 'error'
 
@@ -1041,9 +1119,9 @@ def id_books():
         temp_d = []
         temp_n = []
         page = session.get(url_book_main, headers=headers)
-        if page.status_code != 200:
-            while page.status_code != 200:
-                page = session.get(url_book_main, headers=headers)
+
+        while page.status_code != 200:
+            page = session.get(url_book_main, headers=headers)
         soup = BeautifulSoup(page.text, "html.parser")
         # add title
         number_chapter = soup.find_all('tbody')[0].find_all('tr')
@@ -1056,55 +1134,7 @@ def id_books():
 
         return temp_d, temp_n
     except Exception:
-        return 'error'
-
-
-def create_list_ids_trans(url_parce):
-    time.sleep(1)
-    page = session.get(url_parce, headers=headers)
-    if page.status_code != 200:
-        while page.status_code != 200:
-            page = session.get(url_parce, headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter_id = []
-    # add title
-    number_chapter = soup.find_all('td', class_='t')
-
-    for i_nc in number_chapter:
-        t = i_nc.find_all('div')
-        if t:
-            for i_inc in t:
-                p = i_inc.get('id')
-                if p:
-                    number_chapter_id.append(p)
-        else:
-            number_chapter_id.append('')
-
-    number_chapter_id_str = []
-    for i_nc_id in number_chapter_id:
-        temp_str = str(i_nc_id)
-        number_chapter_id_str.append(temp_str.replace("t", ""))
-
-    if len(number_chapter_id_str) > 0:
-        return number_chapter_id_str
-    else:
-        return 'error'
-
-
-def last_page_trans(url_id_book):
-    page = session.get(url_id_book, headers=headers)
-    if page.status_code != 200:
-        while page.status_code != 200:
-            page = session.get(url_id_book, headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter = soup.find_all('ul', class_='selectable')
-    np = []
-    for i in number_chapter:
-        np = (i.find_all('a'))
-    if len(np) > 0:
-        return np[-1].get_text()
-    else:
-        return 1
+        return 'error', 'error'
 
 
 def restart():
@@ -1170,9 +1200,9 @@ def get_id(id_hash):
 
 def last_page():
     page = session.get(url_book, headers=headers)
-    if page.status_code != 200:
-        while page.status_code != 200:
-            page = session.get(url_book, headers=headers)
+
+    while page.status_code != 200:
+        page = session.get(url_book, headers=headers)
     soup = BeautifulSoup(page.text, "html.parser")
     number_chapter = soup.find_all('ul', class_='selectable')
     np = []
@@ -1185,11 +1215,9 @@ def last_page():
 
 
 def create_list_ids(url_parce):
-    time.sleep(1)
     page = session.get(url_parce, headers=headers)
-    if page.status_code != 200:
-        while page.status_code != 200:
-            page = session.get(url_parce, headers=headers)
+    while page.status_code != 200:
+        page = session.get(url_parce, headers=headers)
     soup = BeautifulSoup(page.text, "html.parser")
     number_chapter_id = []
     # add title
@@ -1210,6 +1238,7 @@ def create_list_ids(url_parce):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    freeze_support()
     # Create and show the main window
     window = MainWindow()
     window.show()
