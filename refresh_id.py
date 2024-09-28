@@ -11,8 +11,8 @@ headers = {
 session = requests.Session()
 url_main = 'http://notabenoid.org/'
 data = {
-    'login[login]': 'erdem1999erdem',
-    'login[pass]': '5b6-shM-wf2-TAs',
+    'login[login]': '',
+    'login[pass]': '',
 }
 result = session.post(url_main, headers=headers, data=data, verify=False)
 
