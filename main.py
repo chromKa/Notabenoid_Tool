@@ -7,6 +7,7 @@ import time
 import webbrowser
 from multiprocessing import Pool, freeze_support
 from sys import argv, executable
+from typing import List
 
 import replace
 import res
@@ -32,8 +33,8 @@ num_with_plus_check = []
 num_with_minus_check = []
 check_tab = 0
 line_number = 1
-file_name_old = ' '
-file_name_new = ' '
+file_name_old = ''
+file_name_new = ''
 file_name_trans = ' '
 file_name_save = ' '
 f1_data = []
@@ -57,6 +58,7 @@ count_add = 0
 url_book_main = ''
 word_text_orig = ''
 word_replacement = ''
+check_not_translate = False
 
 
 class Table(QDialog, table.Ui_Dialog):
@@ -394,7 +396,11 @@ class TaskThread(QThread):
         try:
             time.sleep(self.sleep_time)
             self.progress_value.emit(1)
-            page_last_number = int(last_page())
+            if check_not_translate:
+                page_last_number = int(last_page_nt())
+            else:
+                page_last_number = int(last_page())
+
             self.progress_text.emit(str('start'))
 
             rt = []
@@ -402,7 +408,10 @@ class TaskThread(QThread):
             count_url_bar = 1
             count_bar_refresh = page_last_number * 50 // 100
             for i in range(page_last_number):
-                url_parce = url_book + '?Orig_page=' + str(i + 1)
+                if check_not_translate:
+                    url_parce = url_book + '?' + 'show=1&' + 'Orig_page=' + str(i + 1)
+                else:
+                    url_parce = url_book + '?' + 'Orig_page=' + str(i + 1)
 
                 page = session.get(url_parce, headers=headers)
                 if page.status_code != 200:
@@ -433,8 +442,12 @@ class TaskThread(QThread):
 
     def add_trans(self):
         try:
-            page_last_number = int(last_page())
-            ids_last_page = create_list_ids(url_book + '?Orig_page=' + str(page_last_number))
+            if check_not_translate:
+                page_last_number = int(last_page_nt())
+                ids_last_page = create_list_ids(url_book + '?show=1&Orig_page=' + str(page_last_number))
+            else:
+                page_last_number = int(last_page())
+                ids_last_page = create_list_ids(url_book + '?Orig_page=' + str(page_last_number))
 
             with open(file_name_trans, "r", encoding="utf-8") as f1:
                 all_file_str = f1.readlines()
@@ -444,21 +457,29 @@ class TaskThread(QThread):
                     str(len(ids_last_page) + 50 * (page_last_number - 1)) + ' ' + str(len(all_file_str)))
                 return 'error'
 
+            ids_all = []
             for i in range(page_last_number):
-                url_parce = url_book + '?Orig_page=' + str(i + 1)
+                if check_not_translate:
+                    url_parce = url_book + '?show=1&Orig_page=' + str(i + 1)
+                else:
+                    url_parce = url_book + '?Orig_page=' + str(i + 1)
                 ids_orig = create_list_ids(url_parce)
-                for id_o in range(len(ids_orig)):
-                    text_add = all_file_str[id_o + 50 * i]
+                ids_all.extend(ids_orig)
+            print(len(ids_all))
 
-                    data1 = {
-                        'Translation[body]:': text_add,
-                        'ajax': '1',
-                    }
-                    self.progress_text.emit(str(id_o + 50 * i))
+            for id_o in range(len(ids_all)):
 
-                    if text_add != '' and text_add:
-                        session.post(url_book + '/' + ids_orig[id_o] + '/translate', headers=headers, data=data1,
-                                     verify=False)
+                text_add = all_file_str[id_o]
+
+                data1 = {
+                    'Translation[body]:': text_add,
+                    'ajax': '1',
+                }
+                self.progress_text.emit(str(id_o))
+
+                if text_add != '' and text_add:
+                    session.post(url_book + '/' + ids_all[id_o] + '/translate', headers=headers, data=data1,
+                                 verify=False)
         except Exception as exc:
             self.progress_text.emit(str(exc))
             return 'error'
@@ -675,6 +696,7 @@ class TaskThread(QThread):
             self.finished.emit(f"Task Add Translated Text **** END." + '\n' + t + ' sec')
 
 
+
 class MainWindow(QMainWindow, design.Ui_MainWindow):
     def __init__(self):
         super().__init__()
@@ -683,6 +705,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         # self.ui = uic.loadUi('main.ui', self)
         self.open_login()
         self.open_pass()
+        self.open_url()
         self.setWindowIcon(QtGui.QIcon(':/d/Untitled-12.png'))
         # Dictionary to store task threads
         self.threads = {}
@@ -701,11 +724,14 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             '2) Перейти во вкладку «Добавить оригинал»\n 3) Выбрать «Файл оригинала с сайта»\n '
             '(binary_orig_from_site.txt)\n '
             '4) Выбрать «Новый файл оригинала»\n 5) Добавить комментарий\n 6) Нажать кнопку «Начать»\n\n'
-
+            'Если не выбрать первый файл, программа просто добавит оригинал из второго.\n\n'
             "Таблица в «Добавить оригинал»:\n"
             "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
-            "«Заменить»:\n"
-            "Заменяет целую строку или её фрагмент во всех главах.")
+            "«Заменить»: "
+            "Не работает\n\n"
+            "«Непереведённое»: Использует фильтр при загрузке оригинала и добавлении перевода."
+
+        )
         # Initialize progress bars
         self.progress_bars = [
             self.progressBarRefresh
@@ -742,7 +768,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.radioButton_insert.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.logBoxDownload_5.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 10))
         self.actionRestart.triggered.connect(restart)
-        self.actionnotabenoid_org.triggered.connect(menu_site)
+        self.actionnotabenoid_org.triggered.connect(self.menu_site)
+        self.actionGithub_com.triggered.connect(menu_site_github)
         self.actionQuit.triggered.connect(self.close)
         self.btnBrowseOld.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.btnBrowseNew.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
@@ -768,11 +795,14 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.password.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.urlBook.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.menubar.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 11))
+        self.radioButton_non_trans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
+        self.radioButton_url.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.lineNumber.setGeometry(QtCore.QRect(140, 17, 61, 20))
         self.logBox.clicked.connect(self.check_log_box)
 
         self.password.textEdited.connect(self.save_pass)
         self.login.textEdited.connect(self.save_login)
+        self.urlBook.textEdited.connect(self.save_url)
 
         self.comboBox.currentIndexChanged.connect(self.check_radio)
         self.tabWidget.currentChanged.connect(self.tab_widget3)
@@ -810,6 +840,30 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         # self.logBox.setStyleSheet("QCheckBox::indicator:checked""{""color: rgb(222, 73, 74);""}"
         # "QCheckBox::indicator:unchecked""{""background-color: rgb(72, 73, 74);""}")
         self.menubar.setStyleSheet("background-color: rgb(56, 57, 58);")
+        self.radioButton_non_trans.clicked.connect(self.check_non_t)
+        self.radioButton_url.clicked.connect(self.save_url)
+
+    def menu_site(self):
+        webbrowser.open(self.urlBook.text())
+
+    def check_non_t(self):
+        global check_not_translate
+        if self.radioButton_non_trans.isChecked():
+            check_not_translate = True
+        else:
+            check_not_translate = False
+
+    def save_url(self):
+        if self.radioButton_url.isChecked():
+            with open("./lib/url", "w", encoding='utf-8') as f2:
+                f2.write(self.urlBook.text())
+
+    def open_url(self):
+        if os.path.isfile("./lib/url"):
+            with open("./lib/url", "r", encoding='utf-8') as f2:
+                decoded_text = f2.read()
+                t = str(decoded_text).strip()
+                self.urlBook.setText(t)
 
     def save_login(self):
         if self.radioButton.isChecked():
@@ -1010,13 +1064,13 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             global f2_data
             f1_data = []
             f2_data = []
-            if file_name_old != ' ':
+            if file_name_old != '':
                 with open(file_name_old, "r", encoding="utf-8", errors="strict") as f1:
                     for i in f1:
                         f1_data_t = i.strip()
                         f1_data.append(f1_data_t)
 
-            if file_name_new != ' ':
+            if file_name_new != '':
                 with open(file_name_new, "r", encoding="utf-8", errors="strict") as f2:
                     for i in f2:
                         f2_data_t = i.strip()
@@ -1141,8 +1195,8 @@ def restart():
     os.execl(executable, os.path.abspath(__file__), *argv)
 
 
-def menu_site():
-    webbrowser.open("http://notabenoid.org")
+def menu_site_github():
+    webbrowser.open("https://github.com/chromKa/Notabenoid_Tool")
 
 
 def add_str(id_hash, str_body):
@@ -1196,6 +1250,22 @@ def get_id(id_hash):
         return list_ids[num_str - 1]
     except Exception:
         return 'error'
+
+
+def last_page_nt():
+    page = session.get(url_book + '?show=1', headers=headers)
+
+    while page.status_code != 200:
+        page = session.get(url_book + '?show=1', headers=headers)
+    soup = BeautifulSoup(page.text, "html.parser")
+    number_chapter = soup.find_all('ul', class_='selectable')
+    np = []
+    for i in number_chapter:
+        np = (i.find_all('a'))
+    if len(np) > 0:
+        return np[-1].get_text()
+    else:
+        return 1
 
 
 def last_page():
