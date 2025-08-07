@@ -2,13 +2,14 @@ import datetime
 import difflib
 import math
 import os
+import re
 import sys
 import time
 import webbrowser
 from multiprocessing import Pool, freeze_support
 from sys import argv, executable
-from typing import List
-
+import json
+from collections.abc import Iterable
 import replace
 import res
 import table
@@ -59,6 +60,7 @@ url_book_main = ''
 word_text_orig = ''
 word_replacement = ''
 check_not_translate = False
+json_format_file = ''
 
 
 class Table(QDialog, table.Ui_Dialog):
@@ -404,7 +406,6 @@ class TaskThread(QThread):
             self.progress_text.emit(str('start'))
 
             rt = []
-            count = 1
             count_url_bar = 1
             count_bar_refresh = page_last_number * 50 // 100
             for i in range(page_last_number):
@@ -429,16 +430,42 @@ class TaskThread(QThread):
             global file_name_save
             if not file_name_save:
                 file_name_save = 'binary_orig_from_site.txt'
-
-            with open(file_name_save, "w", encoding="utf-8") as t:
-                for i in rt:
-                    count += 1
-                    t.write(str(i) + '\n')
+            write_from_site(file_name_save, rt)
             self.progress_text.emit(file_name_save)
         except Exception as m:
             exc = m
             self.progress_text.emit(str(exc))
             return
+
+    def process_file(self, file_path):
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors="strict") as f:
+                content = f.read().strip()
+
+                # Определяем тип содержимого
+                if is_valid_json(content):
+                    data = json.loads(content)
+                    result = flatten_data(data)
+
+                else:
+                    # Обработка текстового файла (каждая строка - отдельный элемент)
+                    lines = [line.strip() for line in content.split('\n')]
+                    result = flatten_data(lines)
+
+            return result
+
+        except FileNotFoundError:
+            self.progress_text.emit(f"Ошибка: Файл {file_path} не найден")
+            return None
+        except UnicodeError:
+            self.progress_text.emit('UnicodeError, please recode the files to utf-8')
+            return None
+        except json.JSONDecodeError as e:
+            self.progress_text.emit(f"Ошибка JSON в файле {file_path}: {str(e)}")
+            return None
+        except Exception as e:
+            self.progress_text.emit(f"Ошибка при обработке файла: {str(e)}")
+            return None
 
     def add_trans(self):
         try:
@@ -448,9 +475,9 @@ class TaskThread(QThread):
             else:
                 page_last_number = int(last_page())
                 ids_last_page = create_list_ids(url_book + '?Orig_page=' + str(page_last_number))
-
-            with open(file_name_trans, "r", encoding="utf-8") as f1:
-                all_file_str = f1.readlines()
+            all_file_str = self.process_file(file_name_trans)
+            if all_file_str is None:
+                return 'error'
             if len(ids_last_page) + 50 * (page_last_number - 1) != len(all_file_str):
                 self.progress_text.emit('different string length:')
                 self.progress_text.emit(
@@ -475,7 +502,7 @@ class TaskThread(QThread):
                     'Translation[body]:': text_add,
                     'ajax': '1',
                 }
-                self.progress_text.emit(str(id_o))
+                self.progress_text.emit(str(id_o + 1))
 
                 if text_add != '' and text_add:
                     session.post(url_book + '/' + ids_all[id_o] + '/translate', headers=headers, data=data1,
@@ -522,9 +549,7 @@ class TaskThread(QThread):
             global file_name_save
             if not file_name_save:
                 file_name_save = 'binary_trans_from_site.txt'
-            with open(file_name_save, "w", encoding="utf-8") as t:
-                for i in rt:
-                    t.write(str(i) + '\n')
+            write_from_site(file_name_save, rt)
             self.progress_text.emit(file_name_save)
         except Exception as m:
             exc = m
@@ -696,7 +721,6 @@ class TaskThread(QThread):
             self.finished.emit(f"Task Add Translated Text **** END." + '\n' + t + ' sec')
 
 
-
 class MainWindow(QMainWindow, design.Ui_MainWindow):
     def __init__(self):
         super().__init__()
@@ -729,7 +753,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
             "«Заменить»: "
             "Не работает\n\n"
-            "«Непереведённое»: Использует фильтр при загрузке оригинала и добавлении перевода."
+            "«Непереведённое»: Использует фильтр при загрузке оригинала и добавлении перевода.\n\n"
+            "Поддержка Json файла с одним ключом"
 
         )
         # Initialize progress bars
@@ -779,6 +804,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.btnStartReplace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.btnBrowseTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.btnStartTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.btnFormat.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
+        self.lineEditFormat.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
         self.fileNameTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.logBoxTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
         self.refreshText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
@@ -947,11 +974,20 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             file_name_save = file[0]
             self.lineEditSave.setText(file[0])
 
+    def file_format(self):
+        global json_format_file
+        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
+
+        if file[0] != '':
+            json_format_file = file[0]
+            self.lineEditFormat.setText(file[0])
+
     def file_signal(self):
         self.btnBrowseOld.clicked.connect(self.file_old_button)
         self.btnBrowseNew.clicked.connect(self.file_new_button)
         self.btnBrowseTrans.clicked.connect(self.file_add_trans)
         self.btnBrowseSave.clicked.connect(self.file_save)
+        self.btnFormat.clicked.connect(self.file_format)
 
     def init_signal_slot(self):
         self.btnStartAdd.clicked.connect(self.check_tab_widget)
@@ -973,6 +1009,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         global file_name_trans
         global file_name_new
         global file_name_old
+        global json_format_file
         if self.tabWidget.currentIndex() == 0:
             check_tab = 0
             self.logBoxAdd.clear()
@@ -992,6 +1029,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             insert_radio = self.radioButton_insert.isChecked()
             combo_box_index = self.comboBox.currentIndex()
             file_name_save = self.lineEditSave.text()
+            json_format_file = self.lineEditFormat.text()
             self.start_task()
         elif self.tabWidget.currentIndex() == 3:
             check_tab = 3
@@ -1058,26 +1096,48 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         login_text = self.login.text()
         password_text = self.password.text()
 
-    def redlines_files_old(self):
+    def process_file(self, file_path):
         try:
-            global f1_data
-            global f2_data
-            f1_data = []
-            f2_data = []
-            if file_name_old != '':
-                with open(file_name_old, "r", encoding="utf-8", errors="strict") as f1:
-                    for i in f1:
-                        f1_data_t = i.strip()
-                        f1_data.append(f1_data_t)
+            with open(file_path, 'r', encoding='utf-8', errors="strict") as f:
+                content = f.read().strip()
 
-            if file_name_new != '':
-                with open(file_name_new, "r", encoding="utf-8", errors="strict") as f2:
-                    for i in f2:
-                        f2_data_t = i.strip()
-                        f2_data.append(f2_data_t)
+                # Определяем тип содержимого
+                if is_valid_json(content):
+                    data = json.loads(content)
+                    result = flatten_data(data)
 
+                else:
+                    # Обработка текстового файла (каждая строка - отдельный элемент)
+                    lines = [line.strip() for line in content.split('\n')]
+                    result = flatten_data(lines)
+
+            return result
+
+        except FileNotFoundError:
+            self.update_status_add(f"Ошибка: Файл {file_path} не найден")
+            return None
         except UnicodeError:
             self.update_status_add('UnicodeError, please recode the files to utf-8')
+            return None
+        except json.JSONDecodeError as e:
+            self.update_status_add(f"Ошибка JSON в файле {file_path}: {str(e)}")
+            return None
+        except Exception as e:
+            self.update_status_add(f"Ошибка при обработке файла: {str(e)}")
+            return None
+
+    def redlines_files_old(self):
+        global f1_data
+        global f2_data
+        f1_data = []
+        f2_data = []
+
+        if file_name_old:
+            f1_data = self.process_file(file_name_old)
+
+        if file_name_new:
+            f2_data = self.process_file(file_name_new)
+        if f1_data is None or f2_data is None:
             return 'error'
 
     # Method to start a task
@@ -1116,6 +1176,84 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         # Store the thread in the dictionary and start it
         self.threads = thread
         thread.start()
+
+
+def flatten_data(data):
+    """Рекурсивно разворачивает вложенные структуры данных"""
+    flattened = []
+    if isinstance(data, dict):
+        for value in data.values():
+            flattened.extend(flatten_data(value))
+    elif isinstance(data, Iterable) and not isinstance(data, (str, bytes)):
+        for item in data:
+            flattened.extend(flatten_data(item))
+    else:
+        flattened.append(data)
+    return flattened
+
+
+def is_valid_json(content):
+    try:
+        json.loads(content)
+        return True
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def create_json_template(output_file, key_name):
+    """Создает JSON-шаблон с определением отступов"""
+    indent = detect_indent(output_file) if os.path.exists(output_file) else 4
+    template = {key_name: []}
+
+    with open(output_file, 'w', encoding='utf-8') as f:
+        json.dump(template, f, indent=indent, ensure_ascii=False)
+
+
+def detect_indent(json_file):
+    """Определяет отступ в существующем JSON-файле"""
+    try:
+        with open(json_file, 'r', encoding='utf-8') as f:
+            second_line = f.readlines()[1]  # Читаем вторую строку файла
+
+        # Анализируем отступы во второй строке
+        indent_match = re.match(r'^(\s+)', second_line)
+        if indent_match:
+            return len(indent_match.group(1))
+        return 4  # Значение по умолчанию, если не удалось определить
+    except:
+        return 4  # Значение по умолчанию при ошибках
+
+
+def fill_json_template(template_file, output_file, values, indent=None):
+    """Заполняет шаблон с сохранением форматирования"""
+    # Определяем исходное форматирование
+    detected_indent = 4
+    key = ''
+    if template_file:
+        detected_indent = detect_indent(template_file) if indent is None else indent
+
+        with open(template_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Находим первый ключ с массивом
+        key = next((k for k, v in data.items() if isinstance(v, list)), None)
+
+    if key:
+        data[key] = values
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=detected_indent, ensure_ascii=False)
+    else:
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(values, f, indent=detected_indent, ensure_ascii=False)
+
+
+def write_from_site(file_name, rt):
+    if file_name.lower().endswith('.json'):
+        fill_json_template(json_format_file, file_name, rt)
+    else:
+        with open(file_name, "w", encoding="utf-8") as t:
+            for i in rt:
+                t.write(str(i) + '\n')
 
 
 def dialog_write(q):
