@@ -1,1455 +1,1762 @@
+"""Notabenoid Tool 2.0
+
+Запуск: python main.py
+Зависимости: PyQt6, requests, beautifulsoup4.
+Файлы рядом: main.py, main_ui.py, res.py, папка lib/.
+replace.py, table.py и refresh_id.py больше не нужны (можно удалить).
+"""
+from __future__ import annotations
+
 import datetime
 import difflib
+import json
 import math
 import os
 import re
 import sys
 import time
 import webbrowser
-from multiprocessing import Pool, freeze_support
-from sys import argv, executable
-import json
-from collections.abc import Iterable
-import replace
-import res
-import table
-import main_ui as design
+
+from dataclasses import dataclass, field
+from enum import IntEnum
+from multiprocessing import freeze_support
+from typing import Optional
+from urllib.parse import quote
 import requests
-from PyQt6 import QtWidgets, QtGui, QtCore
-from PyQt6.QtCore import QThread, pyqtSignal
-from PyQt6.QtGui import QFontDatabase, QFont, QPalette, QColor
-from PyQt6.QtWidgets import QMainWindow, QApplication, QDialog, QTableWidgetItem
+import urllib3
 from bs4 import BeautifulSoup
+from PyQt6 import QtGui, QtWidgets
+from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPalette
+from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
 
-session = requests.Session()
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 '
-                  'YaBrowser/23.1.3.949 Yowser/2.5 Safari/537.36',
+import main_ui as design
+import res  # noqa: F401  (Qt resources)
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+BASE_URL = "https://notabenoid.org/"
+GITHUB_URL = "https://github.com/chromKa/Notabenoid_Tool"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/108.0.0.0 YaBrowser/23.1.3.949 "
+        "Yowser/2.5 Safari/537.36"
+    )
 }
-url = 'http://notabenoid.org/'
-url_book = ' '
-login_text = ''
-password_text = ''
-num_with_plus_check = []
-num_with_minus_check = []
-check_tab = 0
-line_number = 1
-file_name_old = ''
-file_name_new = ''
-file_name_trans = ' '
-file_name_save = ' '
-f1_data = []
-f2_data = []
-log_box = True
-insert_radio = True
-entire_radio = True
-comment_text = ' '
-combo_box_index = 0
-time_start = 0.0
-error = False
-count_text = 0
-bar_int = 1
-old_dialog = {}
-new_dialog = {}
-dialog_b = 10
-ch_old = {}
-count_delete = 0
-count_swap = 0
-count_add = 0
-url_book_main = ''
-word_text_orig = ''
-word_replacement = ''
-check_not_translate = False
-json_format_file = ''
+TIMEOUT = (5, 30)
+PAGE_SIZE = 50
+LIB_DIR = "./lib"
+LOG_FILE = "notabenoid_log.txt"
 
 
-class Table(QDialog, table.Ui_Dialog):
+class Tab(IntEnum):
+    ADD = 0
+    REFRESH = 1
+    DOWNLOAD = 2
+    REPLACE = 3
+    ADD_TRANS = 4
+
+
+class DownloadKind(IntEnum):
+    ORIGINAL = 0
+    TRANSLATION = 1
+
+
+# --------------------------------------------------------------------------- #
+# Config
+# --------------------------------------------------------------------------- #
+
+class Config:
     def __init__(self):
-        super().__init__()
-        self.setupUi(self)
-        self.setWindowIcon(QtGui.QIcon(':/d/Untitled-12.png'))
-        global ch_old
-        ch_old = {}
-        old = 0
-        new = 1
-        self.setWindowTitle(" ")
-        self.setWindowFlags(self.windowFlags() |
-                            QtCore.Qt.WindowType.WindowSystemMenuHint |
-                            QtCore.Qt.WindowType.WindowMinMaxButtonsHint)
+        self.login = ""
+        self.password = ""
+        self.book_url = ""
 
-        self.tableWidget.setRowCount(len(new_dialog))
+    def load(self):
+        self.login = self._read("login")
+        self.password = self._read("pass")
+        self.book_url = self._read("url")
 
-        u = 0
-        for key, value in new_dialog.items():
-            self.tableWidget.setVerticalHeaderItem(u, QtWidgets.QTableWidgetItem())
-            self.tableWidget.verticalHeaderItem(u).setText(str(key))
-            self.tableWidget.setItem(u, new, QTableWidgetItem(str(value)))
-            self.tableWidget.item(u, new).setFlags(QtCore.Qt.ItemFlag.ItemIsEditable)
-            u += 1
+    def save_login(self, value: str):
+        self.login = value
+        self._write("login", value)
 
-        u = 0
-        for key, value in old_dialog.items():
-            self.tableWidget.setItem(u, old, QTableWidgetItem(value))
-            u += 1
+    def save_password(self, value: str):
+        self.password = value
+        self._write("pass", value)
 
-        ret = self.exec()
-        self.get_text()
+    def save_url(self, value: str):
+        self.book_url = value
+        self._write("url", value)
 
-        global dialog_b
-        dialog_b = ret
-
-    def get_text(self):
-        global ch_old
-        ch_old = {}
-        for i in range(len(new_dialog)):
-            try:
-                item = self.tableWidget.item(i, 0)
-                item2 = self.tableWidget.item(i, 1)
-                if item and item.text() != '':
-
-                    for key, value in new_dialog.items():
-
-                        if item2.text() == value:
-                            ch_old[key] = item2.text()
-
-                    # ch_old[int(new_dialog.get(item2.text()))] = item2.text()
-            except Exception:
-                ...
-
-
-class TaskThread(QThread):
-    # Using class variables for signals to avoid re-creating them in each instance
-    started = pyqtSignal(str)  # Signal emitted when a task starts
-    progress_value = pyqtSignal(int)  # Signal for updating progress value
-    dialog = pyqtSignal(bool)
-    progress_text = pyqtSignal(str)  # Signal for updating progress text
-    finished = pyqtSignal(str)  # Signal emitted when a task finishes
-
-    def __init__(self, task_id=1, sleep_time=0.0):
-        super().__init__()
-        self.task_id = task_id
-        self.sleep_time = sleep_time
-
-    def stand_add_del(self, delete_add, arr_add, arr_add_str, delete_add_str):
-        global count_text
-        global bar_int
-        global old_dialog
-        global new_dialog
-        global dialog_b
-        global count_add
-        global count_swap
-        dialog_b = 10
-        old_dialog = {}
-        new_dialog = {}
-
-        if len(arr_add) == len(delete_add):
-            for i in range(len(delete_add)):
-                if not log_box:
-                    check_error = change_str(arr_add[i], arr_add_str[i])
-                    if check_error == 'error':
-                        return 'error'
-                count_text += 1
-                self.progress_text.emit('swap ' + str(count_text) + ') ' + str(arr_add[i]) + ': ' + arr_add_str[i])
-                count_swap += 1
-
-        elif len(arr_add) > len(delete_add):
-            if len(delete_add) == 0:
-                for i in range(len(arr_add)):
-                    if not log_box:
-                        check_error = add_str(arr_add[i], arr_add_str[i])
-                        if check_error == 'error':
-                            return 'error'
-                    count_text += 1
-                    self.progress_text.emit('add ' + str(count_text) + ') ' + str(arr_add[i]) + ': ' + arr_add_str[i])
-                    count_add += 1
-
-            elif len(delete_add) != 0:
-                t_dict = {}
-                t_dict_n = {}
-                for i in range(len(delete_add)):
-                    t_dict[delete_add[i]] = delete_add_str[i]
-                    old_dialog = dict(sorted(t_dict.items()))
-                for i in range(len(arr_add)):
-                    t_dict_n[arr_add[i]] = arr_add_str[i]
-                    new_dialog = dict(sorted(t_dict_n.items()))
-
-                self.dialog.emit(True)
-                while dialog_b == 10:
-                    time.sleep(1)
-                if dialog_b == 0:
-                    return 'exit'
-                for i in range(len(arr_add)):
-                    if arr_add[i] in ch_old:
-                        if not log_box:
-                            check_error = change_str(arr_add[i], arr_add_str[i])
-                            if check_error == 'error':
-                                return 'error'
-                        count_text += 1
-                        self.progress_text.emit(
-                            'swap ' + str(count_text) + ') ' + str(arr_add[i]) + ': ' + arr_add_str[i])
-                        count_swap += 1
-                    else:
-                        if not log_box:
-                            check_error = add_str(arr_add[i], arr_add_str[i])
-                            if check_error == 'error':
-                                return 'error'
-                        count_text += 1
-                        self.progress_text.emit(
-                            'add ' + str(count_text) + ') ' + str(arr_add[i]) + ': ' + arr_add_str[i])
-                        count_add += 1
-        '''
-        elif len(delete_add) > len(arr_add):
-            for i in range(len(arr_add)):
-                if not log_box:
-                    change_str(arr_add[i], arr_add_str[i])
-                count_text += 1
-                self.progress_text.emit('swap ' + str(count_text) + ') ' + str(arr_add[i]) + ': ' + arr_add_str[i])
-            delete_add.reverse()
-            delete_add_str.reverse()
-            for p in range(len(delete_add)-len(arr_add)):
-                if not log_box:
-                    delete_str(delete_add[p])
-                self.progress_text.emit('delete ' + str(count_text) + ') ' + str(delete_add[p]) + ': ' 
-                + delete_add_str[p])
-
-            if not log_box:
-                self.refresh_id1(delete_add[-1])
-        '''
-
-    def add_number_unidiff(self, s):
-        global count_text
-        global f1_data
-        result = []
-        count_del = 0
-
-        for l in s:
-            if l[-3:] == '@@\n':
-                tmp = l[4:].split(' ')[0].split(',')
-                delete_add = []
-                arr_add = []
-                arr_add_str = []
-                str_del = []
-                add_num_str = 0
-                if len(tmp) > 1:
-                    add_num_str = int(tmp[1])
-                    for i in range(int(tmp[1])):
-                        delete_add.append(int(tmp[0]) + i + count_del)
-                        str_del.append(s[s.index(l) + 1 + i].removeprefix('-'))
-                elif len(tmp) == 1:
-                    add_num_str = 1
-                    delete_add.append(int(tmp[0]) + count_del)
-                    str_del.append(s[s.index(l) + 1].removeprefix('-'))
-
-                tmp_add = l[4:].split(' ')[1].removeprefix('+').split(',')
-
-                if len(tmp_add) > 1:
-                    for i in range(int(tmp_add[1])):
-                        arr_add.append(int(tmp_add[0]) + i)
-                        arr_add_str.append(s[s.index(l) + add_num_str + 1 + i].removeprefix('+'))
-                        result.append(int(tmp_add[0]) + i)
-                elif len(tmp_add) == 1:
-                    arr_add.append(int(tmp_add[0]))
-                    arr_add_str.append(s[s.index(l) + add_num_str + 1].removeprefix('+'))
-                    result.append(int(tmp_add[0]))
-
-                check_exit = self.stand_add_del(delete_add, arr_add, arr_add_str, str_del)
-                if check_exit == 'exit':
-                    return 'exit'
-                if check_exit == 'error':
-                    return 'error'
-                if not log_box:
-                    # count_del += len(arr_add)-len(delete_add)
-                    ...
-
-        return result
-
-    def delete_number_unidiff(self, s):
-        global f1_data
-        global count_delete
-        result = {}
-        for l in s:
-            if l[-3:] == '@@\n':
-                # check , in first number
-                tmp = l[4:].split(' ')[0].split(',')
-                delete_add = []
-                arr_add = []
-                str_del = []
-                if len(tmp) > 1:
-                    for i in range(int(tmp[1])):
-                        delete_add.append(int(tmp[0]) + i)
-                        str_del.append(s[s.index(l) + 1 + i].removeprefix('-'))
-                elif len(tmp) == 1:
-                    delete_add.append(int(tmp[0]))
-                    str_del.append(s[s.index(l) + 1].removeprefix('-'))
-
-                tmp_add = l[4:].split(' ')[1].removeprefix('+').split(',')
-
-                if len(tmp_add) > 1:
-                    for i in range(int(tmp_add[1])):
-                        arr_add.append(int(tmp_add[0]) + i)
-                elif len(tmp_add) == 1:
-                    arr_add.append(int(tmp_add[0]))
-
-                if len(delete_add) > len(arr_add):
-                    # delete_add.reverse()
-                    for p in range(len(arr_add), len(delete_add)):
-                        result[delete_add[p]] = str_del[p]
-
-        sorted_dict = {key: value for key, value in sorted(result.items(), key=lambda item: item[0], reverse=True)}
-
-        # reverse_dict = dict(reversed(sorted_dict.items()))
-        # result.reverse()
-
-        if len(sorted_dict) > 0:
-            for key, value in sorted_dict.items():
-                if not log_box:
-                    check_error = delete_str(int(key))
-                    if check_error == 'error':
-                        return 'error'
-                f1_data.pop(int(key) - 1)
-
-                self.progress_text.emit('Delete ' + str(key) + ': ' + str(value))
-                count_delete += 1
-
-            if not log_box:
-                self.refresh_id1(list(sorted_dict.items())[-1][0])
-
-    def refresh_id1(self, count_t, count_url_bar=1):
+    @staticmethod
+    def _read(name: str) -> str:
+        os.makedirs(LIB_DIR, exist_ok=True)
+        path = os.path.join(LIB_DIR, name)
+        if not os.path.isfile(path):
+            return ""
         try:
-            time.sleep(self.sleep_time)
-            page_last_number = int(last_page())
-            int_url_id = math.ceil(int(count_t) / 50)
-            count_id_urls = int_url_id * 50 - 49
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
 
-            range_url_ids = page_last_number - int_url_id
-            count_bar_refresh = ((range_url_ids + 1) * 50) // 100
-            # parce pages
+    @staticmethod
+    def _write(name: str, value: str):
+        os.makedirs(LIB_DIR, exist_ok=True)
+        try:
+            with open(os.path.join(LIB_DIR, name), "w", encoding="utf-8") as f:
+                f.write(value)
+        except OSError as exc:
+            _write_log(f"config write error: {exc}")
 
-            count_url = 0
-            for i in range(range_url_ids + 1):
 
-                url_parce = url_book + '?Orig_page=' + str(i + int_url_id)
+# --------------------------------------------------------------------------- #
+# HTTP
+# --------------------------------------------------------------------------- #
 
-                number_chapter_id_str = create_list_ids(url_parce)
+class Http:
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update(HEADERS)
+        self.csrf_refresh_callback = None
+        self.csrf_token: Optional[str] = None
 
-                for id_url_str in number_chapter_id_str:
+    def login(self, login: str, password: str) -> bool:
+        login_url = "https://notabenoid.org/login"
+        try:
+            page = self.session.get(login_url, timeout=TIMEOUT, verify=False)
+            if page.status_code != 200:
+                _write_log(f"login page status {page.status_code}")
+                return False
 
-                    data1 = {
-                        'Orig[ord]': count_id_urls,
-                        'ajax': '1',
-                    }
+            soup = BeautifulSoup(page.text, "html.parser")
+            token_input = soup.find("input", {"name": "_csrf_token"})
+            if not token_input or not token_input.get("value"):
+                _write_log("login: _csrf_token not found")
+                return False
+            token = token_input["value"]
 
-                    session.post(url_book + '/' + id_url_str + '/edit', headers=headers, data=data1, verify=False)
-
-                    count_id_urls += 1
-                    count_url += 1
-                    if count_url // count_url_bar == count_bar_refresh and count_url_bar != 100:
-                        if check_tab != 0:
-                            self.progress_value.emit(count_url_bar)
-                            count_url_bar += 1
-                    self.progress_text.emit('Refresh IDs: ' + str(count_url) + ' - ' + str(count_id_urls - 1))
-
-        except Exception as v:
-            exc = v
-            self.progress_text.emit(str(exc) + ' refresh')
-            return
-
-    def add_comment(self, id_list, string):
-        count = 1
-        for count_t in id_list:
-            page_number = math.ceil(int(count_t) / 50)
-            url_parce = url_book + '?Orig_page=' + str(page_number)
-            number_chapter_id_str = create_list_ids(url_parce)
-            id_hash = number_chapter_id_str[(int(count_t) - 50 * (page_number - 1)) % 50 - 1]
-
-            data1 = {
-                'Comment[body]:': string,
-                'Comment[pid]': '0',
-                'ajax': '1',
+            data = {
+                "_csrf_token": token,
+                "remember": "1",
+                "login": login,
+                "password": password,
             }
-
-            session.post(url_book + '/' + id_hash + '/c0' + '/reply', headers=headers, data=data1, verify=False)
-            # self.progress_text.emit(str(count))
-            count += 1
-        self.progress_text.emit(str(count))
-
-    def compare(self):
-        result_orig = list(difflib.unified_diff(f1_data, f2_data, n=0))
-        if len(result_orig) > 0:
-
-            check_error = self.delete_number_unidiff(result_orig)
-            if check_error == 'error':
-                return 'error'
-
-            result_orig1 = list(difflib.unified_diff(f1_data, f2_data, n=0))
-
-            comment_id_list = self.add_number_unidiff(result_orig1)
-            if comment_id_list == 'exit':
-                return 'exit'
-            if comment_id_list == 'error':
-                return 'error'
-            if not log_box and comment_text != ' ':
-                self.progress_text.emit('Add comments:')
-                self.add_comment(comment_id_list, comment_text)
-            self.progress_text.emit('Add: ' + str(count_add) + ', Swap: ' + str(count_swap) + ', Delete: '
-                                    + str(count_delete))
-
-    def all_str_c(self):
-        try:
-            time.sleep(self.sleep_time)
-            self.progress_value.emit(1)
-            if check_not_translate:
-                page_last_number = int(last_page_nt())
-            else:
-                page_last_number = int(last_page())
-
-            self.progress_text.emit(str('start'))
-
-            rt = []
-            count_url_bar = 1
-            count_bar_refresh = page_last_number * 50 // 100
-            for i in range(page_last_number):
-                if check_not_translate:
-                    url_parce = url_book + '?' + 'show=1&' + 'Orig_page=' + str(i + 1)
-                else:
-                    url_parce = url_book + '?' + 'Orig_page=' + str(i + 1)
-
-                page = session.get(url_parce, headers=headers)
-                if page.status_code != 200:
-                    while page.status_code != 200:
-                        page = session.get(url_parce, headers=headers)
-                soup = BeautifulSoup(page.text, "html.parser")
-                # add title
-                number_chapter = soup.find_all('tbody')[0].findAll('tr')
-
-                for im in number_chapter:
-                    rt.append(im.find('p', class_='text').get_text().rstrip())
-                    if len(rt) // count_url_bar == count_bar_refresh and count_url_bar != 100:
-                        self.progress_value.emit(count_url_bar)
-                        count_url_bar += 1
-            global file_name_save
-            if not file_name_save:
-                file_name_save = 'binary_orig_from_site.txt'
-            write_from_site(file_name_save, rt)
-            self.progress_text.emit(file_name_save)
-        except Exception as m:
-            exc = m
-            self.progress_text.emit(str(exc))
-            return
-
-    def process_file(self, file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors="strict") as f:
-                content = f.read().strip()
-
-                # Определяем тип содержимого
-                if is_valid_json(content):
-                    data = json.loads(content)
-                    result = flatten_data(data)
-
-                else:
-                    # Обработка текстового файла (каждая строка - отдельный элемент)
-                    lines = [line.strip() for line in content.split('\n')]
-                    result = flatten_data(lines)
-
-            return result
-
-        except FileNotFoundError:
-            self.progress_text.emit(f"Ошибка: Файл {file_path} не найден")
-            return None
-        except UnicodeError:
-            self.progress_text.emit('UnicodeError, please recode the files to utf-8')
-            return None
-        except json.JSONDecodeError as e:
-            self.progress_text.emit(f"Ошибка JSON в файле {file_path}: {str(e)}")
-            return None
-        except Exception as e:
-            self.progress_text.emit(f"Ошибка при обработке файла: {str(e)}")
-            return None
-
-    def add_trans(self):
-        try:
-            if check_not_translate:
-                page_last_number = int(last_page_nt())
-                ids_last_page = create_list_ids(url_book + '?show=1&Orig_page=' + str(page_last_number))
-            else:
-                page_last_number = int(last_page())
-                ids_last_page = create_list_ids(url_book + '?Orig_page=' + str(page_last_number))
-            all_file_str = self.process_file(file_name_trans)
-            if all_file_str is None:
-                return 'error'
-            if len(ids_last_page) + 50 * (page_last_number - 1) != len(all_file_str):
-                self.progress_text.emit('different string length:')
-                self.progress_text.emit(
-                    str(len(ids_last_page) + 50 * (page_last_number - 1)) + ' ' + str(len(all_file_str)))
-                return 'error'
-
-            ids_all = []
-            for i in range(page_last_number):
-                if check_not_translate:
-                    url_parce = url_book + '?show=1&Orig_page=' + str(i + 1)
-                else:
-                    url_parce = url_book + '?Orig_page=' + str(i + 1)
-                ids_orig = create_list_ids(url_parce)
-                ids_all.extend(ids_orig)
-            print(len(ids_all))
-
-            for id_o in range(len(ids_all)):
-
-                text_add = all_file_str[id_o]
-
-                data1 = {
-                    'Translation[body]:': text_add,
-                    'ajax': '1',
-                }
-                self.progress_text.emit(str(id_o + 1))
-
-                if text_add != '' and text_add:
-                    session.post(url_book + '/' + ids_all[id_o] + '/translate', headers=headers, data=data1,
-                                 verify=False)
-        except Exception as exc:
-            self.progress_text.emit(str(exc))
-            return 'error'
-
-    def all_str_trans(self):
-        try:
-            page_last_number = int(last_page())
-            self.progress_value.emit(1)
-            self.progress_text.emit(str('start'))
-
-            rt = []
-            count_url_bar = 1
-            count_bar_refresh = page_last_number * 50 // 100
-
-            for i in range(page_last_number):
-                url_parce = url_book + '?Orig_page=' + str(i + 1)
-
-                page = session.get(url_parce, headers=headers)
-                if page.status_code != 200:
-                    while page.status_code != 200:
-                        page = session.get(url_parce, headers=headers)
-                soup = BeautifulSoup(page.text, "html.parser")
-
-                number_chapter = soup.find_all('tbody')[0].findAll('tr')
-
-                for im in number_chapter:
-                    tt = im.find(class_='t').find_all('p', class_='text')
-                    if len(tt) > 1:
-                        rt.append(im.find(class_='t').find(class_='best').find(class_='text').get_text().rstrip())
-                    else:
-                        if tt:
-                            rt.append(tt[0].text.rstrip())
-                        elif insert_radio:
-                            rt.append(im.find(class_='o').find('p', class_='text').get_text().rstrip())
-                        else:
-                            rt.append('')
-                    if len(rt) // count_url_bar == count_bar_refresh and count_url_bar != 100:
-                        self.progress_value.emit(count_url_bar)
-                        count_url_bar += 1
-            global file_name_save
-            if not file_name_save:
-                file_name_save = 'binary_trans_from_site.txt'
-            write_from_site(file_name_save, rt)
-            self.progress_text.emit(file_name_save)
-        except Exception as m:
-            exc = m
-            self.progress_text.emit(str(exc))
-            return
-
-    def compare_string_trans(self, str_translate, id_trans, id_str_original, id_book):
-        try:
-            if not entire_radio:
-                if word_text_orig in str_translate:
-
-                    text_repl = str_translate
-                    count_replace = 0
-                    start_index = 0
-
-                    # count similar
-                    for i in range(len(text_repl)):
-                        j = text_repl.find(word_text_orig, start_index)
-                        if j != -1:
-                            start_index = j + 1
-                            count_replace += 1
-
-                    temp_rep = '#replace_temp_placeholder'
-                    t = ''
-                    for i in range(count_replace):
-                        t = text_repl.replace(word_text_orig, temp_rep)
-                    for i in range(count_replace):
-                        text_repl = t.replace(temp_rep, word_replacement)
-
-                    check_er = replace_site_text(id_trans, id_str_original, id_book, text_repl)
-
-                    if check_er == 'error':
-                        return check_er
-
-                    return text_repl
-            else:
-                if str_translate == word_text_orig or str_translate.strip() == word_text_orig:
-
-                    check_er = replace_site_text(id_trans, id_str_original, id_book, word_replacement)
-
-                    if check_er == 'error':
-                        return check_er
-
-                    return word_replacement
-
-        except Exception as exc:
-            self.progress_text.emit(str(exc))
-
-    def replace_text(self):
-        try:
-            if not word_text_orig or not word_replacement:
-                return 'error'
-            ids_books, name_books = id_books()
-
-            if ids_books == 'error':
-                return 'error'
-            for id_book in ids_books:
-                data_pool = []
-                url_book_t = url_book_main + '/' + id_book
-                all_links = get_all_links(url_book_t)
-                for link in all_links:
-                    data_pool.append({link: session})
-
-                with Pool(10) as p:
-                    data = p.map(replace.make_all, data_pool)
-
-                for num_page, dic in enumerate(data):
-                    for num_orig, id_str_original in enumerate(dic):
-                        for dic_translate in dic[id_str_original]:
-                            for key_dic_translate in dic_translate:
-                                word_rep = self.compare_string_trans(dic_translate[key_dic_translate],
-                                                                     key_dic_translate, id_str_original, id_book)
-                                if word_rep == 'error':
-                                    return word_rep
-                                if word_rep:
-                                    self.progress_text.emit(str(name_books[ids_books.index(id_book)])
-                                                            + ' (' + str(id_book) + ') \n' + str(id_str_original)
-                                                            + ':\n'
-                                                            + str(dic_translate[key_dic_translate])
-                                                            + ' => ' + word_rep + '\n')
-                                    print(word_rep)
-        except Exception as exc:
-            self.progress_text.emit(str(exc))
-            return 'error'
-
-    def run(self):
-        # Emit signal to notify the start of the task
-        if check_tab == 0:
-            self.started.emit(f"Task Add **** START.")
-        elif check_tab == 1:
-            self.started.emit(f"Task Refresh IDs **** START.")
-        elif check_tab == 2:
-            self.started.emit(f"Task Download Text **** START.")
-        elif check_tab == 3:
-            self.started.emit(f"Task Replace Text **** START.")
-        elif check_tab == 4:
-            self.started.emit(f"Task Add Translated Text **** START.")
-        global count_text
-        count_text = 0
-        global count_add
-        global count_swap
-        global count_delete
-        count_swap = 0
-        count_add = 0
-        count_delete = 0
-        # Simulate work by updating progress signals
-        # for i in range(100):
-        # time.sleep(self.sleep_time)
-        # self.progress_value.emit(i + 1)
-        # self.progress_text.emit(f"Task {self.task_id} >>> {i + 1}")
-        # function
-        data = {
-            'login[login]': login_text,
-            'login[pass]': password_text,
-        }
-
-        if login_text != '' and password_text != '':
-            result = session.post(url, headers=headers, data=data, verify=False)
-            if result.status_code != requests.codes.ok:
-                self.finished.emit(f"Error **** END.")
-                return
-
-        self.progress_value.emit(0)
-        if check_tab == 0:
-            check_exit = self.compare()
-            if check_exit == 'exit':
-                self.progress_text.emit('You clicked the cancel button.')
-            elif check_exit == 'error':
-                self.progress_text.emit('Error. You may have selected the wrong row in the table.')
-            else:
-                self.progress_value.emit(100)
-        elif check_tab == 1:
-            self.refresh_id1(line_number)
-            self.progress_value.emit(100)
-        elif check_tab == 2:
-            if combo_box_index == 0:
-                self.all_str_c()
-            elif combo_box_index == 1:
-                self.all_str_trans()
-            self.progress_value.emit(100)
-        elif check_tab == 3:
-            check_er = self.replace_text()
-            if check_er == 'error':
-                self.progress_text.emit('Error.')
-        elif check_tab == 4:
-            check_er = self.add_trans()
-            if check_er == 'error':
-                self.progress_text.emit('Error.')
-
-        global error
-        global url_book_main
-        global word_replacement
-        global word_text_orig
-        error = False
-        url_book_main = ''
-        word_text_orig = ''
-        word_replacement = ''
-
-        t = str(round(time.time() - time_start))
-        if check_tab == 0:
-            self.finished.emit(f"Task Add **** END." + '\n' + t + ' sec')
-        elif check_tab == 1:
-            self.finished.emit(f"Task Refresh IDs **** END." + '\n' + t + ' sec')
-        elif check_tab == 2:
-            self.finished.emit(f"Task Download Text **** END." + '\n' + t + ' sec')
-        elif check_tab == 3:
-            self.finished.emit(f"Task Replace Text **** END." + '\n' + t + ' sec')
-        elif check_tab == 4:
-            self.finished.emit(f"Task Add Translated Text **** END." + '\n' + t + ' sec')
-
-
-class MainWindow(QMainWindow, design.Ui_MainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setupUi(self)
-        # Load the UI from the .ui file
-        # self.ui = uic.loadUi('main.ui', self)
-        self.open_login()
-        self.open_pass()
-        self.open_url()
-        self.setWindowIcon(QtGui.QIcon(':/d/Untitled-12.png'))
-        # Dictionary to store task threads
-        self.threads = {}
-        self.radioButton_insert.setVisible(False)
-        # self.setWindowFlags(QtCore.Qt.WindowType.MaximizeUsingFullscreenGeometryHint)
-        id1 = QFontDatabase.addApplicationFont(":/d/DINPro-CondensedMedium.ttf")
-        self.logBoxAdd.setFont(QFont(QFontDatabase.applicationFontFamilies(id1)))
-        self.logBoxRefresh.setFont(QFont(QFontDatabase.applicationFontFamilies(id1)))
-        self.logBoxDownload.setFont(QFont(QFontDatabase.applicationFontFamilies(id1)))
-        # self.logBoxDownload_5.setFont(QFont(QFontDatabase.applicationFontFamilies(id1)))
-
-        self.logBoxDownload_5.setFontPointSize(13.0)
-
-        self.logBoxDownload_5.setText(
-            '«Добавить оригинал»:\n 1) Скачать текст оригинала с сайта\n (binary_orig_from_site.txt)\n '
-            '2) Перейти во вкладку «Добавить оригинал»\n 3) Выбрать «Файл оригинала с сайта»\n '
-            '(binary_orig_from_site.txt)\n '
-            '4) Выбрать «Новый файл оригинала»\n 5) Добавить комментарий\n 6) Нажать кнопку «Начать»\n\n'
-            'Если не выбрать первый файл, программа просто добавит оригинал из второго.\n\n'
-            "Таблица в «Добавить оригинал»:\n"
-            "Нужно найти наиболее похожие строки в столбцах и сопоставить их.\n\n"
-            "«Заменить»: "
-            "Не работает\n\n"
-            "«Непереведённое»: Использует фильтр при загрузке оригинала и добавлении перевода.\n\n"
-            "Поддержка Json файла с одним ключом"
-
-        )
-        # Initialize progress bars
-        self.progress_bars = [
-            self.progressBarRefresh
-        ]
-
-        for progress_bar in self.progress_bars:
-            progress_bar.setMaximum(100)
-            progress_bar.setMinimum(0)
-            progress_bar.setValue(0)
-
-        # Initialize start buttons
-        self.lineNumber.setText('1')
-        self.sleep_times = [1, 0.1, 0.5]
-        # Connect signals and slots
-        self.login.setPlaceholderText("login")
-        self.password.setPlaceholderText("password")
-        self.urlBook.setPlaceholderText("http://notabenoid.org/book/12345/6789")
-        self.tabWidget.setCurrentIndex(0)
-        self.fileNameOld.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.fileNameNew.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.comment.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.lineNumber.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.progressBarRefresh.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.progressBarDownload.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.radioButton_replace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.logBoxReplace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.replacement_text.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.replace_text_orig.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.replacement_text_n.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.replace_text_orig_n.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.lineEdit_repl.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.url_main_text.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.radioButton.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.radioButton_insert.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.logBoxDownload_5.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 10))
-        self.actionRestart.triggered.connect(restart)
-        self.actionnotabenoid_org.triggered.connect(self.menu_site)
-        self.actionGithub_com.triggered.connect(menu_site_github)
-        self.actionQuit.triggered.connect(self.close)
-        self.btnBrowseOld.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.btnBrowseNew.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.btnStartAdd.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnStartRefresh.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnStartDownload.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnStartReplace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnBrowseTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnStartTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnFormat.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.lineEditFormat.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.fileNameTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.logBoxTrans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.refreshText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.lineEditSave.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.btnBrowseSave.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 13))
-        self.loginText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.passwordText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.urlBookText.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.comboBox.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.comboBox_replace.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.logBox.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.tabWidget.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.login.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.password.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.urlBook.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.menubar.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 11))
-        self.radioButton_non_trans.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.radioButton_url.setFont(QFont(QFontDatabase.applicationFontFamilies(id1), 12))
-        self.lineNumber.setGeometry(QtCore.QRect(140, 17, 61, 20))
-        self.logBox.clicked.connect(self.check_log_box)
-
-        self.password.textEdited.connect(self.save_pass)
-        self.login.textEdited.connect(self.save_login)
-        self.urlBook.textEdited.connect(self.save_url)
-
-        self.comboBox.currentIndexChanged.connect(self.check_radio)
-        self.tabWidget.currentChanged.connect(self.tab_widget3)
-        self.init_signal_slot()
-        self.file_signal()
-        self.logBoxAdd.clear()
-        self.menuFile.setStyleSheet("selection-color: rgb(85, 170, 255);")
-        self.menuHelp.setStyleSheet("selection-color: rgb(85, 170, 255);")
-
-        self.btnStartDownload.setStyleSheet("QPushButton::disabled""{""background-color: rgb(22, 23, 24);""}")
-        self.btnStartAdd.setStyleSheet("QPushButton::disabled""{""background-color: rgb(22, 23, 24);""}")
-        self.btnStartRefresh.setStyleSheet("QPushButton::disabled""{""background-color: rgb(22, 23, 24);""}")
-        self.btnStartReplace.setStyleSheet("QPushButton::disabled""{""background-color: rgb(22, 23, 24);""}")
-        self.logBoxAdd.setFontPointSize(15.0)
-        self.logBoxRefresh.setFontPointSize(15.0)
-        self.logBoxDownload.setFontPointSize(15.0)
-
-        self.login.setStyleSheet("QLineEdit::active""{""background-color: rgb(23, 23, 23);""}" "QLineEdit::disabled""{"
-                                 "background-color: rgb(34, 35, 36);""}")
-        self.password.setStyleSheet(
-            "QLineEdit::active""{""background-color: rgb(23, 23, 23);""}" "QLineEdit::disabled""{""background-color: "
-            "rgb(34, 35, 36);""}")
-        self.urlBook.setStyleSheet(
-            "QLineEdit::active""{""background-color: rgb(23, 23, 23);""}" "QLineEdit::disabled""{""background-color: "
-            "rgb(34, 35, 36);""}")
-        p = self.palette()
-        p.setColor(QPalette.ColorRole.Highlight, QColor(34, 35, 36))
-        self.loginText.setPalette(p)
-        self.passwordText.setPalette(p)
-        self.urlBookText.setPalette(p)
-        self.refreshText.setPalette(p)
-        b = self.palette()
-        b.setColor(QPalette.ColorRole.AlternateBase, QColor(234, 35, 36))
-
-        # self.logBox.setStyleSheet("QCheckBox::indicator:checked""{""color: rgb(222, 73, 74);""}"
-        # "QCheckBox::indicator:unchecked""{""background-color: rgb(72, 73, 74);""}")
-        self.menubar.setStyleSheet("background-color: rgb(56, 57, 58);")
-        self.radioButton_non_trans.clicked.connect(self.check_non_t)
-        self.radioButton_url.clicked.connect(self.save_url)
-
-    def menu_site(self):
-        webbrowser.open(self.urlBook.text())
-
-    def check_non_t(self):
-        global check_not_translate
-        if self.radioButton_non_trans.isChecked():
-            check_not_translate = True
-        else:
-            check_not_translate = False
-
-    def save_url(self):
-        if self.radioButton_url.isChecked():
-            with open("./lib/url", "w", encoding='utf-8') as f2:
-                f2.write(self.urlBook.text())
-
-    def open_url(self):
-        if os.path.isfile("./lib/url"):
-            with open("./lib/url", "r", encoding='utf-8') as f2:
-                decoded_text = f2.read()
-                t = str(decoded_text).strip()
-                self.urlBook.setText(t)
-
-    def save_login(self):
-        if self.radioButton.isChecked():
-            with open("./lib/login", "w", encoding='utf-8') as f2:
-                f2.write(self.login.text())
-
-    def save_pass(self):
-        if self.radioButton.isChecked():
-            with open("./lib/pass", "w", encoding='utf-8') as f2:
-                f2.write(self.password.text())
-
-    def open_login(self):
-        if os.path.isfile("./lib/login"):
-            with open("./lib/login", "r", encoding='utf-8') as f2:
-                decoded_text = f2.read()
-                t = str(decoded_text).strip()
-                self.login.setText(t)
-
-    def open_pass(self):
-        if os.path.isfile("./lib/pass"):
-            with open("./lib/pass", "r", encoding='utf-8') as f2:
-                decoded_text = f2.read()
-                t = str(decoded_text).strip()
-                self.password.setText(t)
-
-    def tab_widget3(self):
-        if self.tabWidget.currentIndex() == 3:
-            self.urlBook.setVisible(False)
-
-        else:
-            self.urlBook.setVisible(True)
-
-    def check_radio(self):
-        if self.comboBox.currentIndex() == 0:
-            self.radioButton_insert.setVisible(False)
-            self.radioButton_insert.setDisabled(True)
-        else:
-            self.radioButton_insert.setVisible(True)
-            self.radioButton_insert.setEnabled(True)
-
-    def check_log_box(self):
-        self.login.setEnabled(not self.logBox.isChecked())
-        self.password.setEnabled(not self.logBox.isChecked())
-
-        self.urlBook.setEnabled(not self.logBox.isChecked())
-
-        self.btnStartRefresh.setDisabled(self.logBox.isChecked())
-        self.btnStartDownload.setDisabled(self.logBox.isChecked())
-        self.btnStartReplace.setDisabled(self.logBox.isChecked())
-        self.btnStartTrans.setDisabled(self.logBox.isChecked())
-
-        self.btnStartAdd.setDisabled(False)
-
-    def file_old_button(self):
-        global file_name_old
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
-        if file[0] != '':
-            self.fileNameOld.setText(file[0])
-            file_name_old = file[0]
-
-    def file_new_button(self):
-        global file_name_new
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
-        if file[0] != '':
-            file_name_new = file[0]
-            self.fileNameNew.setText(file[0])
-
-    def file_add_trans(self):
-        global file_name_trans
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
-
-        if file[0] != '':
-            file_name_trans = file[0]
-            self.fileNameTrans.setText(file[0])
-
-    def file_save(self):
-        global file_name_save
-        file = QtWidgets.QFileDialog.getSaveFileName(self, "Save file")
-
-        if file[0] != '':
-            file_name_save = file[0]
-            self.lineEditSave.setText(file[0])
-
-    def file_format(self):
-        global json_format_file
-        file = QtWidgets.QFileDialog.getOpenFileName(self, "Select file")
-
-        if file[0] != '':
-            json_format_file = file[0]
-            self.lineEditFormat.setText(file[0])
-
-    def file_signal(self):
-        self.btnBrowseOld.clicked.connect(self.file_old_button)
-        self.btnBrowseNew.clicked.connect(self.file_new_button)
-        self.btnBrowseTrans.clicked.connect(self.file_add_trans)
-        self.btnBrowseSave.clicked.connect(self.file_save)
-        self.btnFormat.clicked.connect(self.file_format)
-
-    def init_signal_slot(self):
-        self.btnStartAdd.clicked.connect(self.check_tab_widget)
-        self.btnStartRefresh.clicked.connect(self.check_tab_widget)
-        self.btnStartDownload.clicked.connect(self.check_tab_widget)
-        self.btnStartReplace.clicked.connect(self.check_tab_widget)
-        self.btnStartTrans.clicked.connect(self.check_tab_widget)
-
-    def check_tab_widget(self):
-        global check_tab
-        global line_number
-        global combo_box_index
-        global word_text_orig
-        global word_replacement
-        global url_book_main
-        global insert_radio
-        global entire_radio
-        global file_name_save
-        global file_name_trans
-        global file_name_new
-        global file_name_old
-        global json_format_file
-        if self.tabWidget.currentIndex() == 0:
-            check_tab = 0
-            self.logBoxAdd.clear()
-            file_name_new = self.fileNameNew.text()
-            file_name_old = self.fileNameOld.text()
-
-            self.start_task()
-        elif self.tabWidget.currentIndex() == 1:
-            check_tab = 1
-            self.logBoxRefresh.clear()
-
-            line_number = self.lineNumber.text()
-            self.start_task()
-        elif self.tabWidget.currentIndex() == 2:
-            check_tab = 2
-            self.logBoxDownload.clear()
-            insert_radio = self.radioButton_insert.isChecked()
-            combo_box_index = self.comboBox.currentIndex()
-            file_name_save = self.lineEditSave.text()
-            json_format_file = self.lineEditFormat.text()
-            self.start_task()
-        elif self.tabWidget.currentIndex() == 3:
-            check_tab = 3
-            self.logBoxReplace.clear()
-            url_book_main = self.url_main_text.text()
-            if url_book_main[-1] == '/':
-                url_book_main = url_book_main[:-1]
-            word_text_orig = self.replace_text_orig.toPlainText()
-            entire_radio = self.radioButton_replace.isChecked()
-            word_replacement = self.replacement_text.toPlainText()
-
-            self.start_task()
-        elif self.tabWidget.currentIndex() == 4:
-            check_tab = 4
-            file_name_trans = self.fileNameTrans.text()
-            self.logBoxTrans.clear()
-            self.start_task()
-
-    # Update status in the list widget
-    def update_status_add(self, text):
-        log_write(text)
-        if check_tab == 0:
-            self.logBoxAdd.append(text)
-        elif check_tab == 1:
-            self.logBoxRefresh.append(text)
-        elif check_tab == 2:
-            self.logBoxDownload.append(text)
-        elif check_tab == 3:
-            self.logBoxReplace.append(text)
-        elif check_tab == 4:
-            self.logBoxTrans.append(text)
-
-    # Update progress in the corresponding progress bar
-    def update_progress_add(self, value):
-        if check_tab == 0:
-            ...
-        elif check_tab == 1:
-            self.progressBarRefresh.setValue(value)
-        elif check_tab == 2:
-            self.progressBarDownload.setValue(value)
-
-    # Toggle the state of the start button based on the task state
-    def toggle_button(self, enable=True):
-        self.btnStartAdd.setDisabled(not enable)
-        if not log_box:
-            self.btnStartRefresh.setDisabled(not enable)
-            self.btnStartDownload.setDisabled(not enable)
-            self.btnStartReplace.setDisabled(not enable)
-            self.btnStartTrans.setDisabled(not enable)
-        self.logBox.setDisabled(not enable)
-
-    def take_text(self):
-        global url_book
-        global login_text
-        global password_text
-        global log_box
-        global comment_text
-        if self.comment.text() != '':
-            comment_text = self.comment.text()
-        else:
-            comment_text = ' '
-        log_box = self.logBox.isChecked()
-        url_book = self.urlBook.text()
-        login_text = self.login.text()
-        password_text = self.password.text()
-
-    def process_file(self, file_path):
-        try:
-            with open(file_path, 'r', encoding='utf-8', errors="strict") as f:
-                content = f.read().strip()
-
-                # Определяем тип содержимого
-                if is_valid_json(content):
-                    data = json.loads(content)
-                    result = flatten_data(data)
-
-                else:
-                    # Обработка текстового файла (каждая строка - отдельный элемент)
-                    lines = [line.strip() for line in content.split('\n')]
-                    result = flatten_data(lines)
-
-            return result
-
-        except FileNotFoundError:
-            self.update_status_add(f"Ошибка: Файл {file_path} не найден")
-            return None
-        except UnicodeError:
-            self.update_status_add('UnicodeError, please recode the files to utf-8')
-            return None
-        except json.JSONDecodeError as e:
-            self.update_status_add(f"Ошибка JSON в файле {file_path}: {str(e)}")
-            return None
-        except Exception as e:
-            self.update_status_add(f"Ошибка при обработке файла: {str(e)}")
-            return None
-
-    def redlines_files_old(self):
-        global f1_data
-        global f2_data
-        f1_data = []
-        f2_data = []
-
-        if file_name_old:
-            f1_data = self.process_file(file_name_old)
-
-        if file_name_new:
-            f2_data = self.process_file(file_name_new)
-        if f1_data is None or f2_data is None:
-            return 'error'
-
-    # Method to start a task
-    def start_task(self):
-        sleep_time = 0.1
-        global error
-        error = False
-
-        if check_tab == 0:
-            check_error = self.redlines_files_old()
-            if check_error == 'error':
-                return
-
-        if not self.logBox.isChecked():
-            self.take_text()
-        else:
-            global log_box
-            log_box = True
-
-        # Create a TaskThread instance for the selected task
-        thread = TaskThread(sleep_time=sleep_time)
-
-        # Connect signals and slots for the task
-        global time_start
-        time_start = time.time()
-        self.update_status_add(str(datetime.datetime.now())[:19])
-
-        thread.started.connect(self.update_status_add)
-        thread.started.connect(lambda: self.toggle_button(enable=False))
-        thread.progress_value.connect(lambda value: self.update_progress_add(value))
-        thread.dialog.connect(dialog_write)
-        thread.progress_text.connect(self.update_status_add)
-        thread.finished.connect(self.update_status_add)
-        thread.finished.connect(lambda: self.toggle_button(enable=True))
-
-        # Store the thread in the dictionary and start it
-        self.threads = thread
-        thread.start()
-
-
-def flatten_data(data):
-    """Рекурсивно разворачивает вложенные структуры данных"""
-    flattened = []
-    if isinstance(data, dict):
-        for value in data.values():
-            flattened.extend(flatten_data(value))
-    elif isinstance(data, Iterable) and not isinstance(data, (str, bytes)):
-        for item in data:
-            flattened.extend(flatten_data(item))
-    else:
-        flattened.append(data)
-    return flattened
-
-
-def is_valid_json(content):
-    try:
-        json.loads(content)
-        return True
-    except (json.JSONDecodeError, TypeError):
+            headers = {
+                "Referer": login_url,
+                "Origin": "https://notabenoid.org",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            resp = self.session.post(
+                login_url, data=data, headers=headers,
+                timeout=TIMEOUT, verify=False, allow_redirects=True,
+            )
+            if resp.url.rstrip("/").endswith("/login"):
+                _write_log(f"login failed: still on {resp.url}")
+                return False
+            _write_log(f"login ok: redirected to {resp.url}")
+            return True
+        except requests.RequestException as exc:
+            _write_log(f"login error: {exc}")
+            return False
+
+    def get(self, url: str) -> Optional[requests.Response]:
+        for attempt in range(3):
+            try:
+                r = self.session.get(url, timeout=TIMEOUT, verify=False)
+                if r.status_code == 200:
+                    return r
+            except requests.RequestException as exc:
+                _write_log(f"GET {url}: {exc}")
+            if attempt < 2:
+                time.sleep(0.5)
+        return None
+
+    def post(self, url: str, data=None, extra_headers=None) -> bool:
+        for attempt in range(2):
+            headers = {}
+            if self.csrf_token:
+                headers["X-CSRFToken"] = self.csrf_token
+            if extra_headers:
+                headers.update(extra_headers)
+            try:
+                r = self.session.post(
+                    url, data=data, headers=headers,
+                    timeout=TIMEOUT, verify=False,
+                )
+                if r.status_code in (403, 419) and attempt == 0:
+                    self._on_csrf_expired()
+                    continue
+                return r.ok
+            except requests.RequestException as exc:
+                _write_log(f"POST {url}: {exc}")
+                return False
         return False
 
+    def delete(self, url: str, extra_headers=None) -> bool:
+        for attempt in range(2):
+            headers = {}
+            if self.csrf_token:
+                headers["X-CSRFToken"] = self.csrf_token
+            if extra_headers:
+                headers.update(extra_headers)
+            try:
+                r = self.session.delete(
+                    url, headers=headers,
+                    timeout=TIMEOUT, verify=False,
+                )
+                if r.status_code in (403, 419) and attempt == 0:
+                    self._on_csrf_expired()
+                    continue
+                return r.ok
+            except requests.RequestException as exc:
+                _write_log(f"DELETE {url}: {exc}")
+                return False
+        return False
 
-def create_json_template(output_file, key_name):
-    """Создает JSON-шаблон с определением отступов"""
-    indent = detect_indent(output_file) if os.path.exists(output_file) else 4
-    template = {key_name: []}
+    def _on_csrf_expired(self):
+        if self.csrf_refresh_callback:
+            self.csrf_refresh_callback()
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(template, f, indent=indent, ensure_ascii=False)
+    def soup(self, url: str) -> Optional[BeautifulSoup]:
+        r = self.get(url)
+        return BeautifulSoup(r.text, "html.parser") if r else None
 
 
-def detect_indent(json_file):
-    """Определяет отступ в существующем JSON-файле"""
+# --------------------------------------------------------------------------- #
+# SiteClient
+# --------------------------------------------------------------------------- #
+
+class SiteClient:
+    def __init__(self, http: Http, book_url: str = "", csrf_url: str = ""):
+        self.http = http
+        self.book_url = book_url.rstrip("/")
+        self.csrf_url = (csrf_url or self.book_url or BASE_URL).rstrip("/")
+
+    def page_url(self, page: int, *, not_translated: bool = False) -> str:
+        suffix = "?show=1&page=" if not_translated else "?page="
+        return f"{self.book_url}{suffix}{page}"
+
+    def last_page(self, *, not_translated: bool = False) -> int:
+        url = self.book_url + ("?show=1" if not_translated else "")
+        soup = self.http.soup(url)
+        if not soup:
+            return 1
+        pages = 0
+        for ul in soup.find_all("ul", class_="selectable"):
+            links = ul.find_all("a")
+            if links:
+                try:
+                    pages = max(pages, int(links[-1].get_text().strip()))
+                except (TypeError, ValueError):
+                    pass
+        return pages or 1
+
+    def page_ids(self, url: str) -> list[str]:
+        soup = self.http.soup(url)
+        if not soup:
+            return []
+        ids = []
+        for row in soup.find_all("tr"):
+            rid = row.get("id")
+            if rid and str(rid).startswith("o"):
+                ids.append(str(rid)[1:])
+        return ids
+
+    def get_row_id(self, ordinal: int) -> Optional[str]:
+        try:
+            page = math.ceil(ordinal / PAGE_SIZE)
+            ids = self.page_ids(self.page_url(page))
+            index = math.floor(ordinal - PAGE_SIZE * (page - 1)) - 1
+            return ids[index]
+        except (IndexError, ValueError):
+            return None
+
+    def add_str(self, ordinal: int, body: str) -> bool:
+        url = f"{self.book_url}/0/edit"
+        data = {"ord": ordinal, "body": body}
+        headers = {"HX-Request": "true", "HX-Target": "o0"}
+        return self.http.post(url, data=data, extra_headers=headers)
+
+    def change_str(self, ordinal: int, body: str) -> bool:
+        rid = self.get_row_id(ordinal)
+        if rid is None:
+            return False
+        url = f"{self.book_url}/{rid}/edit"
+        data = {"ord": ordinal, "body": body}
+        headers = {"HX-Request": "true", "HX-Target": f"o{rid}"}
+        return self.http.post(url, data=data, extra_headers=headers)
+
+    def delete_str(self, ordinal: int) -> bool:
+        rid = self.get_row_id(ordinal)
+        if rid is None:
+            return False
+        url = f"{self.book_url}/{rid}/remove"
+        headers = {"HX-Request": "true", "HX-Target": f"o{rid}"}
+        return self.http.delete(url, extra_headers=headers)
+
+    def refresh_ids_from(self, start_line: int, log=None) -> None:
+        last = self.last_page()
+        start_page = math.ceil(start_line / PAGE_SIZE)
+        ordinal = start_page * PAGE_SIZE - (PAGE_SIZE - 1)
+
+        if log:
+            log(f"refresh: страницы {start_page}..{last}, начну с ord={ordinal}")
+
+        ok_count = 0
+        fail_count = 0
+
+        for page in range(start_page, last + 1):
+            soup = self.http.soup(self.page_url(page))
+            if not soup:
+                if log:
+                    log(f"  страница {page}/{last} не загрузилась — пропускаю")
+                fail_count += PAGE_SIZE
+                continue
+            tbody = soup.find_all("tbody")
+            if not tbody:
+                continue
+
+            for row in tbody[0].find_all("tr"):
+                rid_raw = row.get("id")
+                if not rid_raw or not str(rid_raw).startswith("o"):
+                    continue
+                rid = str(rid_raw)[1:]
+
+                p = row.find("p", class_="text")
+                current_body = p.get_text(separator="\n").rstrip() if p else ""
+
+                url = f"{self.book_url}/{rid}/edit"
+                data = {"ord": ordinal, "body": current_body}
+                headers = {"HX-Request": "true", "HX-Target": f"o{rid}"}
+                if self.http.csrf_token:
+                    headers["X-CSRFToken"] = self.http.csrf_token
+
+                try:
+                    r = self.http.session.post(
+                        url, data=data, headers=headers,
+                        timeout=TIMEOUT, verify=False,
+                    )
+                    if r.status_code in (419, 403):
+                        if log:
+                            log(f"ord={ordinal} rid={rid} — сессия протухла, обновляю токен…")
+                        self.refetch_csrf()
+                        if self.http.csrf_token:
+                            headers["X-CSRFToken"] = self.http.csrf_token
+                        r = self.http.session.post(
+                            url, data=data, headers=headers,
+                            timeout=TIMEOUT, verify=False,
+                        )
+
+                    if r.status_code == 200:
+                        status = "OK"
+                        ok_count += 1
+                    elif r.status_code == 403:
+                        status = "ОТКАЗ (403): нет прав на редактирование"
+                        fail_count += 1
+                    elif r.status_code == 404:
+                        status = "НЕ НАЙДЕНО (404): строка удалена?"
+                        fail_count += 1
+                    elif r.status_code == 419:
+                        status = "CSRF-ТОКЕН УСТАРЕЛ (419)"
+                        fail_count += 1
+                    elif r.status_code >= 500:
+                        status = f"ОШИБКА СЕРВЕРА ({r.status_code})"
+                        fail_count += 1
+                    else:
+                        status = f"НЕОЖИДАННЫЙ ОТВЕТ ({r.status_code})"
+                        fail_count += 1
+
+                    if log:
+                        log(f"ord={ordinal} rid={rid} — {status}")
+                    if r.status_code != 200 and log:
+                        log(f"   ответ сервера: {r.text[:300]!r}")
+                except requests.RequestException as exc:
+                    fail_count += 1
+                    if log:
+                        log(f"ord={ordinal} rid={rid} — СЕТЬ: {exc}")
+
+                ordinal += 1
+
+        if log:
+            if fail_count:
+                log(f"refresh: готово. Успешно: {ok_count}, ошибок: {fail_count}")
+                log("⚠ Некоторые строки не обновились — запустите «Обновить ID» ещё раз.")
+            else:
+                log(f"refresh: готово. Все {ok_count} строк обновлены.")
+
+    def add_comment(self, ordinal: int, text: str) -> bool:
+        rid = self.get_row_id(ordinal)
+        if rid is None:
+            return False
+        url = f"{self.book_url}/{rid}/comments/reply"
+        data = {"pid": "0", "body": text}
+        headers = {
+            "HX-Request": "true",
+            "HX-Current-URL": f"{self.book_url}/{rid}",
+        }
+        return self.http.post(url, data=data, extra_headers=headers)
+
+    def add_translation(self, row_id: str, text: str) -> bool:
+        url = f"{self.book_url}/{row_id}/translate"
+        data = {"body": text}
+        headers = {
+            "HX-Request": "true",
+            "HX-Current-URL": f"{self.book_url}/{row_id}",
+        }
+        return self.http.post(url, data=data, extra_headers=headers)
+
+    def replace_translation(
+            self, chapter_url: str, orig_id: str, tr_id: str, body: str,
+    ) -> bool:
+        """chapter_url = 'https://notabenoid.org/book/NNN/MMM'"""
+        url = f"{chapter_url}/{orig_id}/translate?tr_id={tr_id}"
+        data = {"body": body}
+        headers = {
+            "HX-Request": "true",
+            "HX-Current-URL": chapter_url,
+        }
+        return self.http.post(url, data=data, extra_headers=headers)
+
+    def refetch_csrf(self) -> None:
+        soup = self.http.soup(self.csrf_url)
+        if not soup:
+            return
+        meta = soup.find("meta", {"name": "csrf-token"})
+        if meta and meta.get("content"):
+            self.http.csrf_token = meta["content"]
+            return
+        inp = soup.find("input", {"name": "_csrf_token"})
+        if inp and inp.get("value"):
+            self.http.csrf_token = inp["value"]
+
+
+# --------------------------------------------------------------------------- #
+# Files
+# --------------------------------------------------------------------------- #
+
+def flatten(data) -> list:
+    if isinstance(data, dict):
+        out = []
+        for v in data.values():
+            out.extend(flatten(v))
+        return out
+    if isinstance(data, list):
+        out = []
+        for item in data:
+            out.extend(flatten(item))
+        return out
+    return [data]
+
+
+def read_lines(path: str) -> list[str]:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 1. Строгий JSON
     try:
-        with open(json_file, 'r', encoding='utf-8') as f:
-            second_line = f.readlines()[1]  # Читаем вторую строку файла
+        data = json.loads(content)
+        return [str(x) for x in flatten(data)]
+    except json.JSONDecodeError:
+        pass
 
-        # Анализируем отступы во второй строке
-        indent_match = re.match(r'^(\s+)', second_line)
-        if indent_match:
-            return len(indent_match.group(1))
-        return 4  # Значение по умолчанию, если не удалось определить
-    except:
-        return 4  # Значение по умолчанию при ошибках
-
-
-def fill_json_template(template_file, output_file, values, indent=None):
-    """Заполняет шаблон с сохранением форматирования"""
-    # Определяем исходное форматирование
-    detected_indent = 4
-    key = ''
-    if template_file:
-        detected_indent = detect_indent(template_file) if indent is None else indent
-
-        with open(template_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # Находим первый ключ с массивом
-        key = next((k for k, v in data.items() if isinstance(v, list)), None)
-
-    if key:
-        data[key] = values
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=detected_indent, ensure_ascii=False)
-    else:
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(values, f, indent=detected_indent, ensure_ascii=False)
-
-
-def write_from_site(file_name, rt):
-    if file_name.lower().endswith('.json'):
-        fill_json_template(json_format_file, file_name, rt)
-    else:
-        with open(file_name, "w", encoding="utf-8") as t:
-            for i in rt:
-                t.write(str(i) + '\n')
-
-
-def dialog_write(q):
-    if q:
-        Table()
-
-
-def log_write(text):
+    # 2. Мягкий JSON: разрешает raw newline/tab внутри строк
     try:
-        with open('notenaboid_log.txt', "a", encoding="utf-8") as f1:
-            f1.write(text.rstrip() + '\n')
-    except Exception:
-        ...
+        data = json.loads(content, strict=False)
+        _write_log(f"WARN: {path} — невалидный JSON, распарсен мягко")
+        return [str(x) for x in flatten(data)]
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Текст
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    return [line.rstrip("\r") for line in lines]
 
 
-def last_page_replace(url_id_book):
-    page = session.get(url_id_book, headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter = soup.find_all('ul', class_='selectable')
-    np = []
-    for i in number_chapter:
-        np = (i.find_all('a'))
-    if len(np) > 0:
-        return int(np[-1].get_text())
+def write_lines(path: str, lines: list[str], json_template: str = "") -> None:
+    if path.lower().endswith(".json"):
+        indent, template = 4, {}
+        if json_template and os.path.isfile(json_template):
+            with open(json_template, "r", encoding="utf-8") as f:
+                template = json.load(f)
+            try:
+                with open(json_template, "r", encoding="utf-8") as f:
+                    second = f.readlines()[1]
+                m = re.match(r"^(\s+)", second)
+                if m:
+                    indent = len(m.group(1))
+            except (OSError, IndexError):
+                pass
+        key = next((k for k, v in template.items() if isinstance(v, list)), None)
+        payload = {**template, key: lines} if key else lines
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=indent, ensure_ascii=False)
     else:
-        return 1
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(f"{line}\n" for line in lines)
 
 
-def get_all_links(url_all):
-    num_last = last_page_replace(url_all)
-    links = []
+# --------------------------------------------------------------------------- #
+# RunState
+# --------------------------------------------------------------------------- #
 
-    for i in range(num_last):
-        links.append(url_all + '?Orig_page=' + str(i + 1))
-    return links
+@dataclass
+class RunState:
+    tab: Tab
+    book_url: str = ""
+    dry_run: bool = False
+    login: str = ""
+    password: str = ""
+
+    f1_data: list = field(default_factory=list)
+    f2_data: list = field(default_factory=list)
+    comment: str = ""
+
+    start_line: int = 1
+
+    download_kind: DownloadKind = DownloadKind.ORIGINAL
+    only_untranslated: bool = False
+    insert_from_original: bool = False
+    save_path: str = ""
+    json_template: str = ""
+
+    main_url: str = ""
+    search_text: str = ""
+    replacement: str = ""
+    replace_entire: bool = True
+
+    translation_file: str = ""
+
+    add_count: int = 0
+    swap_count: int = 0
+    del_count: int = 0
 
 
-def replace_site_text(id_line_t, id_str_original, id_book, str_repl):
-    data1 = {
-        'Translation[body]:': str_repl,
-        'ajax': '1',
+# --------------------------------------------------------------------------- #
+# TaskThread
+# --------------------------------------------------------------------------- #
+
+class TaskThread(QThread):
+    task_started = pyqtSignal(str)
+    task_finished = pyqtSignal(str)
+    progress_value = pyqtSignal(int)
+    progress_text = pyqtSignal(str)
+
+    def __init__(self, state: RunState, parent=None):
+        super().__init__(parent)
+        self.state = state
+        self.http = Http()
+        csrf_url = state.book_url or state.main_url or BASE_URL
+        self.client = SiteClient(self.http, state.book_url, csrf_url=csrf_url)
+        self._stop = False
+        self.http.csrf_refresh_callback = self.client.refetch_csrf
+
+    def stop(self):
+        self._stop = True
+
+    # --- обёртки над операциями (dry_run) ---
+    def _add(self, ordinal: int, text: str):
+        if not self.state.dry_run:
+            ok = self.client.add_str(ordinal, text)
+            if not ok:
+                self.progress_text.emit(
+                    f"add {ordinal}: {text} — FAILED\n"
+                    f"⚠ Задача прервана. На сайте состояние частично изменено.\n"
+                    f"⚠ Очистите поле «Файл оригинала с сайта» и перезапустите."
+                )
+                self._stop = True
+                return
+        self.state.add_count += 1
+        self.progress_text.emit(f"add {self.state.add_count}) {ordinal}: {text}")
+
+    def _swap(self, ordinal: int, text: str):
+        if not self.state.dry_run:
+            ok = self.client.change_str(ordinal, text)
+            if not ok:
+                self.progress_text.emit(
+                    f"swap {ordinal}: {text} — FAILED\n"
+                    f"⚠ Задача прервана. На сайте состояние частично изменено.\n"
+                    f"⚠ Очистите поле «Файл оригинала с сайта» и перезапустите."
+                )
+                self._stop = True
+                return
+        self.state.swap_count += 1
+        self.progress_text.emit(f"swap {self.state.swap_count}) {ordinal}: {text}")
+
+    def _delete(self, ordinal: int, text: str):
+        if self.state.dry_run:
+            self.state.del_count += 1
+            self.progress_text.emit(f"delete {ordinal}: {text}")
+            if 0 <= ordinal - 1 < len(self.state.f1_data):
+                self.state.f1_data.pop(ordinal - 1)
+            return
+
+        if not self.client.delete_str(ordinal):
+            self.progress_text.emit(
+                f"delete {ordinal}: {text} — FAILED\n"
+                f"⚠ Задача прервана. Часть удалений ДО этого могла пройти успешно.\n"
+                f"⚠ Проверьте книгу на сайте и запустите «Обновить ID» (вкладка 2), "
+                f"затем повторите «Добавить оригинал» с очищенным старым файлом."
+            )
+            self._stop = True
+            return
+
+        self.state.del_count += 1
+        if 0 <= ordinal - 1 < len(self.state.f1_data):
+            self.state.f1_data.pop(ordinal - 1)
+        self.progress_text.emit(f"delete {ordinal}: {text}")
+
+    def run(self):
+        self.task_started.emit(f"Task {self.state.tab.name} START")
+        start = time.time()
+        try:
+            if self.state.login and self.state.password:
+                if not self.http.login(self.state.login, self.state.password):
+                    self.progress_text.emit(
+                        "Login failed — проверьте логин/пароль. "
+                        "Все книги приватные, без авторизации работать не будет."
+                    )
+                    return
+                self.progress_text.emit("Login OK")
+            else:
+                if not self.state.dry_run:
+                    self.progress_text.emit("Логин и пароль не заданы — нельзя работать с приватной книгой")
+                    return
+                self.progress_text.emit(
+                    "⚠ Логин/пароль не заданы. Для приватной книги скачивание оригинала не сработает."
+                )
+            self.client.refetch_csrf()
+            # self.progress_text.emit("CSRF token refreshed")
+            self.progress_value.emit(0)
+            {
+                Tab.ADD: self._task_add,
+                Tab.REFRESH: self._task_refresh,
+                Tab.DOWNLOAD: self._task_download,
+                Tab.REPLACE: self._task_replace,
+                Tab.ADD_TRANS: self._task_add_trans,
+            }[self.state.tab]()
+        except Exception as exc:
+            self.progress_text.emit(f"Error: {exc}")
+        finally:
+            self.task_finished.emit(
+                f"Task {self.state.tab.name} END ({round(time.time() - start)}s)"
+            )
+
+    # ---------------- Tab 0: ADD ----------------
+    def _ensure_f1_data(self) -> bool:
+        """Если старый файл не выбран — тянем текущее состояние книги с сайта."""
+        if self.state.f1_data:
+            return True
+        if not self.state.book_url:
+            self.progress_text.emit(
+                "Выберите старый файл или укажите URL книги, чтобы скачать её текущее состояние"
+            )
+            return False
+
+        self.progress_text.emit("Скачиваю текущий оригинал с сайта…")
+        saved = self.state.only_untranslated
+        self.state.only_untranslated = False
+        try:
+            self.state.f1_data = self._download_originals()
+        finally:
+            self.state.only_untranslated = saved
+
+        if not self.state.f1_data:
+            self.progress_text.emit(
+                "Не удалось скачать оригинал с сайта. Проверьте:\n"
+                "  • URL книги верный и книга существует;\n"
+                "  • логин/пароль верные (книга приватная);\n"
+                "  • вы имеете доступ к этой книге на notabenoid.org"
+            )
+            return False
+        self.progress_text.emit(f"Скачано {len(self.state.f1_data)} строк")
+        return True
+
+    def _task_add(self):
+        if not self._ensure_f1_data():
+            return
+
+        sm = difflib.SequenceMatcher(
+            None, self.state.f1_data, self.state.f2_data, autojunk=False,
+        )
+        opcodes = sm.get_opcodes()
+        if all(tag == "equal" for tag, *_ in opcodes):
+            self.progress_text.emit("Files are identical")
+            return
+
+        if self.state.dry_run:
+            self.progress_text.emit("--- DRY-RUN preview (# = позиция в новом файле) ---")
+
+        added = self._apply_diff()
+        if self.state.dry_run:
+            self.state.f1_data = []
+            return
+        if added:
+            if self.state.comment.strip():
+                for ordinal in added:
+                    if self._stop:
+                        break
+                    self.client.add_comment(ordinal, self.state.comment)
+
+        self.progress_text.emit(
+            f"Add: {self.state.add_count}, "
+            f"Swap: {self.state.swap_count}, "
+            f"Delete: {self.state.del_count}"
+        )
+
+        # Сбрасываем скачанный f1_data — следующий запуск гарантированно перекачает
+        self.state.f1_data = []
+
+    def _apply_diff(self) -> list[int]:
+        to_delete = self._plan_deletions()
+        for ordinal in sorted(to_delete, reverse=True):
+            if self._stop:
+                return []
+            self._delete(ordinal, to_delete[ordinal])
+
+        if self._stop:
+            return []
+
+        if to_delete and not self.state.dry_run:
+            self.client.refresh_ids_from(min(to_delete))
+
+        return self._plan_additions()
+
+    def _plan_deletions(self) -> dict[int, str]:
+        sm = difflib.SequenceMatcher(
+            None, self.state.f1_data, self.state.f2_data, autojunk=False,
+        )
+        to_delete: dict[int, str] = {}
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "delete":
+                for i in range(i1, i2):
+                    to_delete[i + 1] = self.state.f1_data[i]
+            elif tag == "replace" and (i2 - i1) > (j2 - j1):
+                for k in range(j2 - j1, i2 - i1):
+                    to_delete[i1 + 1 + k] = self.state.f1_data[i1 + k]
+        return to_delete
+
+    def _optimal_pairs(self, old_lines: list[str], new_lines: list[str]) -> dict[int, int]:
+        """Монотонное назначение ВСЕХ old на подмножество new (максимум similarity).
+
+        Возвращает {new_idx: old_idx}. Требует len(old) <= len(new).
+        Гарантирует монотонность: если i1 < i2 — то new_idx(i1) < new_idx(i2).
+        """
+        n, m = len(old_lines), len(new_lines)
+        if n == 0 or m == 0 or n > m:
+            return {}
+
+        sim = [
+            [difflib.SequenceMatcher(None, old_lines[i], new_lines[j], autojunk=False).ratio()
+             for j in range(m)]
+            for i in range(n)
+        ]
+
+        NEG = float('-inf')
+        dp = [[NEG] * (m + 1) for _ in range(n + 1)]
+        choice = [[''] * (m + 1) for _ in range(n + 1)]
+
+        # 0 old matched = 0 score для любого j
+        for j in range(m + 1):
+            dp[0][j] = 0.0
+            choice[0][j] = 'base'
+
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                # match old[i-1] с new[j-1]
+                if dp[i - 1][j - 1] > NEG:
+                    cand = dp[i - 1][j - 1] + sim[i - 1][j - 1]
+                    if cand > dp[i][j]:
+                        dp[i][j] = cand
+                        choice[i][j] = 'match'
+                # пропустить new[j-1] (skip_old НЕ разрешён — все old обязаны matched)
+                if dp[i][j - 1] > dp[i][j]:
+                    dp[i][j] = dp[i][j - 1]
+                    choice[i][j] = 'skip_new'
+
+        if dp[n][m] == NEG:
+            return {}
+
+        pairs: dict[int, int] = {}
+        i, j = n, m
+        while i > 0 and j > 0:
+            ch = choice[i][j]
+            if ch == 'match':
+                pairs[j - 1] = i - 1
+                i -= 1
+                j -= 1
+            elif ch == 'skip_new':
+                j -= 1
+            else:
+                break
+        return pairs
+
+    def _plan_additions(self) -> list[int]:
+        sm = difflib.SequenceMatcher(
+            None, self.state.f1_data, self.state.f2_data, autojunk=False,
+        )
+        added: list[int] = []
+        shift = 0  # сколько строк уже вставлено до текущего opcode
+
+        for tag, i1, i2, j1, j2 in sm.get_opcodes():
+            if tag == "equal":
+                continue
+
+            if tag == "insert":
+                for k in range(j2 - j1):
+                    ordinal = i1 + 1 + shift + k
+                    if self._stop:
+                        return added
+                    self._add(ordinal, self.state.f2_data[j1 + k])
+                    added.append(ordinal)
+                shift += (j2 - j1)
+
+            elif tag == "replace":
+                old_n = i2 - i1
+                new_n = j2 - j1
+
+                if old_n == new_n:
+                    for k in range(new_n):
+                        ordinal = i1 + 1 + shift + k
+                        if self._stop:
+                            return added
+                        self._swap(ordinal, self.state.f2_data[j1 + k])
+                        added.append(ordinal)
+
+                elif old_n < new_n:
+                    old_lines = self.state.f1_data[i1:i2]
+                    new_lines = self.state.f2_data[j1:j2]
+                    pairs = self._optimal_pairs(old_lines, new_lines)
+
+                    # 1. swap для пар, где текст реально изменился
+                    for ni in sorted(pairs.keys(), key=lambda n: pairs[n]):
+                        oi = pairs[ni]
+                        if old_lines[oi] == new_lines[ni]:
+                            continue  # текст совпадает — POST не нужен
+                        ordinal = i1 + 1 + oi + shift
+                        if self._stop:
+                            return added
+                        self._swap(ordinal, new_lines[ni])
+                        added.append(ordinal)
+
+                    # 2. insert для новых строк без пары
+                    cur = i1 + shift  # 0-based позиция в f1_data
+                    for ni in range(new_n):
+                        if ni in pairs:
+                            cur += 1  # matched — уже на своём месте
+                        else:
+                            ordinal = cur + 1  # 1-based
+                            if self._stop:
+                                return added
+                            self._add(ordinal, new_lines[ni])
+                            added.append(ordinal)
+                            cur += 1
+
+                    shift += (new_n - old_n)
+
+                # old_n > new_n — уже удалено в фазе 1
+
+        return added
+    # ---------------- Tab 1: REFRESH ----------------
+    def _task_refresh(self):
+        if self.state.dry_run:
+            self.progress_text.emit("Dry-run: skipping refresh")
+            return
+        self.client.refresh_ids_from(
+            self.state.start_line,
+            log=lambda msg: self.progress_text.emit(msg),
+        )
+        self.progress_value.emit(100)
+
+    # ---------------- Tab 2: DOWNLOAD ----------------
+    def _task_download(self):
+        if self.state.download_kind == DownloadKind.ORIGINAL:
+            lines = self._download_originals()
+            default = "binary_orig_from_site.txt"
+        else:
+            lines = self._download_translations()
+            default = "binary_trans_from_site.txt"
+
+        path = self.state.save_path or default
+        write_lines(path, lines, self.state.json_template)
+        self.progress_text.emit(f"Saved {len(lines)} lines -> {path}")
+
+    def _download_originals(self) -> list[str]:
+        last = self.client.last_page(not_translated=self.state.only_untranslated)
+        result: list[str] = []
+        failed = 0
+        for page in range(1, last + 1):
+            if self._stop:
+                break
+            soup = self.http.soup(
+                self.client.page_url(page, not_translated=self.state.only_untranslated)
+            )
+            if not soup:
+                failed += 1
+                self.progress_text.emit(f"  page {page}/{last}: not fetched")
+                continue
+            tbody = soup.find_all("tbody")
+            if not tbody:
+                continue
+            for row in tbody[0].find_all("tr"):
+                p = row.find("p", class_="text")
+                if p:
+                    result.append(p.get_text(separator="\n").rstrip())
+            self.progress_value.emit(int(100 * page / last))
+        if failed:
+            self.progress_text.emit(f"⚠ {failed} page(s) failed to download")
+        return result
+
+    def _download_translations(self) -> list[str]:
+        last = self.client.last_page()
+        result: list[str] = []
+        for page in range(1, last + 1):
+            if self._stop:
+                break
+            soup = self.http.soup(self.client.page_url(page))
+            if not soup:
+                continue
+            tbody = soup.find_all("tbody")
+            if not tbody:
+                continue
+            for row in tbody[0].find_all("tr"):
+                t_cell = row.find(class_="t")
+                if t_cell is None:
+                    continue
+                texts = t_cell.find_all("p", class_="text")
+                if len(texts) > 1:
+                    best = t_cell.find(class_="best")
+                    if best:
+                        p = best.find("p", class_="text")
+                        if p:
+                            result.append(p.get_text(separator="\n").rstrip())
+                            continue
+                if texts:
+                    result.append(texts[0].get_text(separator="\n").rstrip())
+                elif self.state.insert_from_original:
+                    o_cell = row.find(class_="o")
+                    p = o_cell.find("p", class_="text") if o_cell else None
+                    if p:
+                        result.append(p.get_text(separator="\n").rstrip())
+                else:
+                    result.append("")
+            self.progress_value.emit(int(100 * page / last))
+        return result
+
+    # ---------------- Tab 4: ADD TRANS ----------------
+    def _task_add_trans(self):
+        not_tr = self.state.only_untranslated
+
+        last = self.client.last_page(not_translated=not_tr)
+        if last < 1:
+            self.progress_text.emit("Cannot determine last page")
+            return
+
+        try:
+            texts = read_lines(self.state.translation_file)
+        except Exception as exc:
+            self.progress_text.emit(f"File error: {exc}")
+            return
+
+        if not texts:
+            self.progress_text.emit("Файл перевода пуст")
+            return
+
+        all_ids: list[str] = []
+        for page in range(1, last + 1):
+            if self._stop:
+                return
+            ids = self.client.page_ids(
+                self.client.page_url(page, not_translated=not_tr)
+            )
+            if not ids:
+                self.progress_text.emit(
+                    f"⚠ Страница {page}/{last} вернула 0 ID — прерываю.\n"
+                    f"Перевод НЕ загружен. Проверьте соединение и повторите."
+                )
+                return
+            if page < last and len(ids) != PAGE_SIZE:
+                self.progress_text.emit(
+                    f"⚠ Страница {page}/{last}: {len(ids)} строк "
+                    f"(ожидалось {PAGE_SIZE}) — прерываю.\n"
+                    f"Перевод НЕ загружен — иначе rid/text рассинхронизируются."
+                )
+                return
+            all_ids.extend(ids)
+
+        if len(all_ids) != len(texts):
+            self.progress_text.emit(
+                f"Length mismatch: site={len(all_ids)} file={len(texts)}"
+            )
+            return
+
+        if self.state.dry_run:
+            non_empty = sum(1 for t in texts if t)
+            self.progress_text.emit(
+                f"--- DRY-RUN: применилось бы {non_empty}/{len(texts)} переводов "
+                f"({len(texts) - non_empty} пустых пропущено) ---"
+            )
+            return
+
+        added = 0
+        failed = 0
+        empty = 0
+        for i, (rid, text) in enumerate(zip(all_ids, texts), start=1):
+            if self._stop:
+                return
+            if i % 50 == 0 or i == len(all_ids):
+                self.progress_text.emit(f"{i}/{len(all_ids)}")
+            if not text:
+                empty += 1
+                continue
+            if self.client.add_translation(rid, text):
+                added += 1
+            else:
+                failed += 1
+                self.progress_text.emit(f"  ✗ row {i} (rid={rid}) failed")
+
+        self.progress_text.emit(
+            f"Done: added={added}, failed={failed}, empty_skipped={empty}"
+        )
+
+    # ---------------- Tab 3: REPLACE ----------------
+    def _task_replace(self):
+        if not self.state.search_text:
+            self.progress_text.emit("Empty search text")
+            return
+        if not self.state.main_url:
+            self.progress_text.emit("Main URL is empty")
+            return
+
+        urls = self._resolve_targets(self.state.main_url)
+        if not urls:
+            return
+
+        self.progress_text.emit(f"Целей: {len(urls)} глава/глав")
+        if self.state.dry_run:
+            self.progress_text.emit("--- DRY-RUN: изменения НЕ отправляются ---")
+
+        total_ok = total_fail = total_found = 0
+        for idx, chapter_url in enumerate(urls, start=1):
+            if self._stop:
+                break
+            self.progress_text.emit(f"\n[{idx}/{len(urls)}] {chapter_url}")
+
+            filter_text = (
+                self.state.search_text
+                if len(self.state.search_text) >= 2
+                else None
+            )
+
+            chapter_title, entries = self._scan_chapter_translations(
+                chapter_url, search_text=filter_text,
+            )
+            if chapter_title:
+                self.progress_text.emit(f"название: {chapter_title}")
+            if filter_text:
+                self.progress_text.emit(
+                    f"  фильтр сервера: tt={filter_text!r} "
+                    f"(вариантов перевода в выдаче: {len(entries)})"
+                )
+            else:
+                self.progress_text.emit(
+                    f"  без фильтра (search_text короче 2 символов), "
+                    f"вариантов: {len(entries)}"
+                )
+
+            if not entries:
+                self.progress_text.emit("  (нет переводов)")
+                continue
+
+            for orig_id, tr_id, text in entries:
+                if self._stop:
+                    break
+                new_text = self._replace_in_text(text)
+                if new_text is None or new_text == text:
+                    continue
+                total_found += 1
+                if self.state.dry_run:
+                    self.progress_text.emit(
+                        f"  would replace {orig_id}/{tr_id}: "
+                        f"{text[:60]!r} => {new_text[:60]!r}"
+                    )
+                    continue
+                if self.client.replace_translation(
+                        chapter_url, orig_id, tr_id, new_text,
+                ):
+                    total_ok += 1
+                    self.progress_text.emit(f"  ✓ {orig_id}/{tr_id}")
+                else:
+                    total_fail += 1
+                    self.progress_text.emit(f"  ✗ {orig_id}/{tr_id} failed")
+
+        if self.state.dry_run:
+            self.progress_text.emit(f"\nDRY-RUN: нашлось {total_found} совпадений")
+        else:
+            self.progress_text.emit(
+                f"\nDone: replaced={total_ok}, failed={total_fail}, "
+                f"matched={total_found}"
+            )
+
+    def _replace_in_text(self, text: str) -> Optional[str]:
+        if self.state.replace_entire:
+            return self.state.replacement if text == self.state.search_text else None
+        if self.state.search_text not in text:
+            return None
+        return text.replace(self.state.search_text, self.state.replacement)
+
+    def _resolve_targets(self, url: str) -> list[str]:
+        """Понимает /book/NNN (вся книга) и /book/NNN/MMM (одна глава)."""
+        m = re.match(r"^(https?://[^/]+)/book/(\d+)(?:/(\d+))?/?$", url)
+        if not m:
+            self.progress_text.emit(
+                "URL не распознан. Ожидается https://notabenoid.org/book/NNN "
+                "или https://notabenoid.org/book/NNN/MMM"
+            )
+            return []
+        host, book_id, chapter_id = m.groups()
+        if chapter_id:
+            return [f"{host}/book/{book_id}/{chapter_id}"]
+        urls = self._chapter_urls(host, book_id)
+        if not urls:
+            self.progress_text.emit(
+                f"В книге {book_id} не найдено глав — "
+                f"проверьте, что страница /book/{book_id} открывается"
+            )
+        return urls
+
+    def _chapter_urls(self, host: str, book_id: str) -> list[str]:
+        """Собирает URL всех глав книги со страницы оглавления."""
+        soup = self.http.soup(f"{host}/book/{book_id}")
+        if not soup:
+            return []
+
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        # Основной путь — <tr data-id> в таблице глав (стабильнее, чем href)
+        table = soup.find("table", id="chapters")
+        if table is not None:
+            tbody = table.find("tbody")
+            if tbody is not None:
+                for tr in tbody.find_all("tr"):
+                    chapter_id = tr.get("data-id")
+                    if not chapter_id or not str(chapter_id).isdigit():
+                        continue
+                    if chapter_id in seen:
+                        continue
+                    seen.add(chapter_id)
+                    urls.append(f"{host}/book/{book_id}/{chapter_id}")
+
+        # Fallback — по href, если таблицы нет
+        if not urls:
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if re.match(rf"^/book/{book_id}/\d+$", href):
+                    if href in seen:
+                        continue
+                    seen.add(href)
+                    urls.append(f"{host}{href}")
+        return urls
+
+    def _scan_chapter_translations(
+            self, chapter_url: str,
+            search_text: Optional[str] = None,
+    ) -> tuple[str, list[tuple[str, str, str]]]:
+        """Все переводы одной главы.
+
+        Если передан search_text — используем серверный фильтр notabenoid
+        ?show=6&tt=SEARCH, который вернёт только страницы, где в переводе
+        встречается подстрока. Это в 10–100 раз быстрее.
+        """
+        if search_text:
+            base = f"{chapter_url}?show=6&tt={quote(search_text)}"
+            page_sep = "&"
+        else:
+            base = chapter_url
+            page_sep = "?"
+
+        first = self.http.soup(base)
+        if not first:
+            self.progress_text.emit("  не удалось открыть главу")
+            return "", []
+
+        title = ""
+        h1 = first.find("h1")
+        if h1:
+            a = h1.find("a")
+            if a and a.next_sibling:
+                title = str(a.next_sibling).strip().lstrip(":").strip()
+            if not title:
+                title = h1.get_text(separator=" ").strip()
+
+        last = 1
+        for ul in first.find_all("ul", class_="selectable"):
+            links = ul.find_all("a")
+            if links:
+                try:
+                    last = max(last, int(links[-1].get_text().strip()))
+                except (TypeError, ValueError):
+                    pass
+
+        result: list[tuple[str, str, str]] = []
+        for page in range(1, last + 1):
+            if self._stop:
+                return title, result
+            if page == 1:
+                soup = first
+            else:
+                soup = self.http.soup(f"{base}{page_sep}page={page}")
+            if not soup:
+                self.progress_text.emit(f"  page {page}/{last}: not fetched")
+                continue
+            tbody = soup.find_all("tbody")
+            if not tbody:
+                continue
+            for row in tbody[0].find_all("tr"):
+                rid_raw = row.get("id")
+                if not rid_raw or not str(rid_raw).startswith("o"):
+                    continue
+                orig_id = str(rid_raw)[1:]
+                t_cell = row.find("td", class_="t")
+                if t_cell is None:
+                    continue
+                for div in t_cell.find_all("div"):
+                    div_id = div.get("id") or ""
+                    if not (div_id.startswith("t") and div_id[1:].isdigit()):
+                        continue
+                    p = div.find("p", class_="text")
+                    if p:
+                        result.append(
+                            (orig_id, div_id[1:],
+                             p.get_text(separator="\n").rstrip())
+                        )
+        return title, result
+# --------------------------------------------------------------------------- #
+# MainWindow
+# --------------------------------------------------------------------------- #
+
+class MainWindow(QMainWindow, design.Ui_MainWindow):
+    FONT_MAP = {
+        "fileNameOld": 12, "fileNameNew": 12, "comment": 12, "lineNumber": 12,
+        "progressBarRefresh": 12, "progressBarDownload": 12,
+        "radioButton_replace": 12, "logBoxReplace": 12,
+        "replacement_text": 12, "replace_text_orig": 12,
+        "replacement_text_n": 12, "replace_text_orig_n": 12,
+        "lineEdit_repl": 12, "url_main_text": 12,
+        "radioButton": 12, "radioButton_insert": 12,
+        "logBoxDownload_5": 10,
+        "btnBrowseOld": 12, "btnBrowseNew": 12,
+        "btnStartAdd": 13, "btnStartRefresh": 13, "btnStartDownload": 13,
+        "btnStartReplace": 13, "btnBrowseTrans": 13, "btnStartTrans": 13,
+        "btnFormat": 13, "lineEditFormat": 12,
+        "fileNameTrans": 13, "logBoxTrans": 13, "refreshText": 13,
+        "lineEditSave": 13, "btnBrowseSave": 13,
+        "loginText": 12, "passwordText": 12, "urlBookText": 12,
+        "comboBox": 12, "comboBox_replace": 12, "logBox": 12,
+        "tabWidget": 12, "login": 12, "password": 12, "urlBook": 12,
+        "radioButton_non_trans": 12, "radioButton_url": 12,
     }
 
-    result = session.post(url_book_main + '/' + id_book + '/' + id_str_original + '/translate?tr_id=' + id_line_t,
-                          headers=headers,
-                          data=data1, verify=False)
-    if result.status_code == requests.codes.ok:
-        return '200'
-    else:
-        return 'error'
+    def __init__(self):
+        super().__init__()
+        self.setupUi(self)
+        self.setWindowIcon(QtGui.QIcon(":/d/Untitled-12.png"))
+        self.config = Config()
+        self.config.load()
+        self.thread: Optional[TaskThread] = None
+        self.running_tab: Optional[Tab] = None
+
+        self._init_fonts()
+        self._init_state()
+        self._connect()
+
+    def _init_fonts(self):
+        fid = QFontDatabase.addApplicationFont(":/d/DINPro-CondensedMedium.ttf")
+        families = QFontDatabase.applicationFontFamilies(fid)
+        family = families[0] if families else "Arial"
+        for name, size in self.FONT_MAP.items():
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setFont(QFont(family, size))
+        self.menubar.setFont(QFont(family, 11))
+
+        for name, size in (("logBoxAdd", 15.0), ("logBoxRefresh", 15.0),
+                           ("logBoxDownload", 15.0)):
+            w = getattr(self, name, None)
+            if w is not None and hasattr(w, "setFontPointSize"):
+                try:
+                    w.setFontPointSize(size)
+                except Exception:
+                    pass
+
+        dis = "QPushButton::disabled{background-color: rgb(22, 23, 24);}"
+        for n in ("btnStartAdd", "btnStartRefresh",
+                  "btnStartDownload", "btnStartReplace", "btnStartTrans"):
+            getattr(self, n).setStyleSheet(dis)
+
+        edit_qss = ("QLineEdit::active{background-color: rgb(23, 23, 23);}"
+                    "QLineEdit::disabled{background-color: rgb(34, 35, 36);}")
+        for n in ("login", "password", "urlBook"):
+            getattr(self, n).setStyleSheet(edit_qss)
+
+        p = self.palette()
+        p.setColor(QPalette.ColorRole.Highlight, QColor(34, 35, 36))
+        for n in ("loginText", "passwordText", "urlBookText", "refreshText"):
+            getattr(self, n).setPalette(p)
+        self.menubar.setStyleSheet(
+            "QMenuBar {"
+            "  background-color: rgb(56, 57, 58);"
+            "  color: rgb(247, 247, 247);"
+            "}"
+            "QMenuBar::item {"
+            "  background: transparent;"
+            "  padding: 4px 10px;"
+            "}"
+            "QMenuBar::item:selected {"
+            "  background-color: rgb(85, 170, 255);"
+            "  color: rgb(20, 20, 20);"
+            "}"
+            "QMenuBar::item:pressed {"
+            "  background-color: rgb(60, 130, 200);"
+            "  color: rgb(20, 20, 20);"
+            "}"
+            "QMenu {"
+            "  background-color: rgb(45, 45, 45);"
+            "  color: rgb(247, 247, 247);"
+            "  border: 1px solid rgb(80, 80, 80);"
+            "}"
+            "QMenu::item {"
+            "  padding: 6px 24px;"
+            "  background: transparent;"
+            "}"
+            "QMenu::item:selected {"
+            "  background-color: rgb(85, 170, 255);"
+            "  color: rgb(20, 20, 20);"
+            "}"
+            "QMenu::item:disabled {"
+            "  color: rgb(120, 120, 120);"
+            "}"
+            "QMenu::separator {"
+            "  height: 1px;"
+            "  background: rgb(70, 70, 70);"
+            "  margin: 4px 8px;"
+            "}"
+        )
+        self.radioButton_non_trans.setStyleSheet(
+            "QRadioButton:disabled { color: rgb(90, 90, 90); }"
+        )
+
+    def _init_state(self):
+        self.login.setPlaceholderText("login")
+        self.password.setPlaceholderText("password")
+        self.urlBook.setPlaceholderText("https://notabenoid.org/book/12345/6789")
+        self.fileNameOld.setPlaceholderText("Пусто = скачать текущий оригинал с сайта")
+        self.login.setText(self.config.login)
+        self.password.setText(self.config.password)
+        self.urlBook.setText(self.config.book_url)
+        self.lineNumber.setText("1")
+        self.tabWidget.setCurrentIndex(0)
+        self.radioButton_insert.setVisible(False)
+        for bar in (self.progressBarRefresh, self.progressBarDownload):
+            bar.setRange(0, 100)
+            bar.setValue(0)
+
+        replace_tab = self.tabWidget.widget(int(Tab.REPLACE))
+        if replace_tab is not None:
+            replace_tab.setEnabled(True)
+        self.btnStartReplace.setEnabled(True)
+        # Отдельная галка dry-run на вкладке «Заменить».
+        # Состояние синхронизируется с self.logBox (см. _connect).
+        self.replaceDryCheck = QtWidgets.QCheckBox(
+            "Пробный прогон — на сайт ничего не отправляется"
+        )
+        self.replaceDryCheck.setFont(self.logBox.font())
+        if replace_tab is not None:
+            layout = replace_tab.layout()
+            if layout is not None:
+                # рядом с кнопкой «Начать» (11, 1), занимаем (11, 2..4)
+                layout.addWidget(self.replaceDryCheck, 11, 2, 1, 3)
+        self._update_nt_state()
+        self._on_tab(self.tabWidget.currentIndex())
+        self.logBoxDownload_5.setHtml(
+            "<html><head><style>"
+            "p { white-space: pre-wrap; margin: 6px 0; }"
+            "b { color: #8ecbff; }"
+            "</style></head><body "
+            "style=\"font-family:'JetBrains Mono',monospace; color:#ffffff;\">"
+
+            "<p><b>=== Общее ===</b></p>"
+            "<p>Все книги на notabenoid <b>приватные</b> — без логина и пароля программа не работает, даже в dry-run. "
+            "Введите логин/пароль и URL книги сверху. Галки «Сохранить логин и пароль» / «Сохранить Url» "
+            "хранят данные в папке lib/ между запусками.</p>"
+
+            "<p>Галка <b>«Сравнить файлы без замены»</b> (вкладка «Добавить оригинал») и галка "
+            "<b>«Пробный прогон»</b> (вкладка «Заменить») — это одно и то же состояние: включая одну, включаете обе. "
+            "В dry-run POST-запросы на изменение не отправляются, только читаются страницы.</p>"
+
+            "<p><b>=== Добавить оригинал ===</b></p>"
+            "<p>1. Выберите «Новый файл оригинала» — это новое состояние книги.<br/>"
+            "2. «Файл оригинала с сайта» можно не указывать — программа сама скачает текущее состояние с сайта и сравнит.<br/>"
+            "3. Комментарий (необязательно) — добавится к новым строкам.<br/>"
+            "4. Нажмите «Начать». В dry-run покажет план, без dry-run применит на сайте.</p>"
+
+            "<p><b>Как работает сравнение:</b><br/>"
+            "• Совпавшие строки не трогаются.<br/>"
+            "• Удалённые — удаляются с конца (чтобы номера не съезжали), затем автоматически Refresh ID.<br/>"
+            "• Вставленные — добавляются на нужные позиции.<br/>"
+            "• Изменённые 1→1 — заменяются (текст обновляется, перевод сохраняется).<br/>"
+            "• Блоки N→M — программа сама находит наиболее похожие пары, чтобы сохранить привязанные переводы.</p>"
+
+            "<p>После успешного прогона кэш старого файла сбрасывается — следующий запуск перекачает свежее состояние "
+            "с сайта. Очищать поле «Файл оригинала с сайта» вручную не нужно.</p>"
+
+            "<p><b>Если задача упала</b> (сеть, протух CSRF) — на сайте состояние может быть частично изменено. "
+            "Очистите «Файл оригинала с сайта» и перезапустите — программа перекачает актуальное состояние.</p>"
+
+            "<p><b>=== Обновить ID ===</b></p>"
+            "<p>Убирает дыры в нумерации строк (обычно после удалений). Укажите номер строки, с которой начать — обычно 1. "
+            "В dry-run ничего не делает.</p>"
+            "<p style=\"color:#ff6b6b\"><b>⚠ ВАЖНО: после обновления проверьте ID на сайте!</b><br/>"
+            "1. Откройте книгу на notabenoid.org в браузере.<br/>"
+            "2. Нумерация строк должна идти <b>#1, #2, #3…</b> подряд — без пропусков и дублей.<br/>"
+            "3. В логе программы последняя строка — «Все N строк обновлены». "
+            "Если увидели «⚠ Некоторые строки не обновились» — нажмите «Обновить ID» ещё раз.<br/>"
+            "4. Порядковые номера (ord) — это основа всех операций. Если они сбились, "
+            "добавление и замена будут ориентироваться не на те строки. "
+            "Не запускайте «Добавить оригинал» или «Заменить», пока ID не выровнены.</p>"
+
+            "<p><b>=== Скачать текст ===</b></p>"
+            "<p>Сохраняет оригинал или перевод книги в файл.<br/>"
+            "• .txt — по строкам, каждая строка файла = фрагмент сайта.<br/>"
+            "• .json — можно указать шаблон, структура сохранится.<br/>"
+            "• «Непереведённое» — фильтр: только строки без перевода (работает только для «Оригинал»).<br/>"
+            "• «Заменять пустые строки оригиналом» — если перевода нет, подставить текст оригинала.</p>"
+
+            "<p>При скачивании перевода: если у фрагмента несколько вариантов, берётся <b>лучший</b> "
+            "(class=«best»). Если лучшего нет — первый по порядку.</p>"
+
+            "<p><b>=== Заменить ===</b></p>"
+            "<p>Замена перевода. Укажите URL <b>главы</b> (https://notabenoid.org/book/NNN/MMM) — "
+            "заменит только в ней, или URL <b>книги</b> (https://notabenoid.org/book/NNN) — "
+            "обойдёт все главы книги.<br/>"
+            "• «Только целые строки» — заменять, только если перевод полностью совпадает с искомым текстом.<br/>"
+            "• Без галки — заменять вхождения подстроки внутри более длинных переводов (все вхождения).<br/>"
+            "• <b>Поиск регистрозависим:</b> «Hello» и «hello» — разные строки.<br/>"
+            "• <b>Ищется по тексту перевода,</b> а не по CSS-классу. Если у div «class=«best»», "
+            "но текст «defddd», программа его не найдёт при поиске «best».<br/>"
+            "• Фильтр сервера `?show=6&tt=` применяется автоматически для запросов длиной 2+ символов — "
+            "это в 100+ раз быстрее на больших книгах (скачиваются только страницы с совпадениями).<br/>"
+            "• В dry-run в логе будет список всех планируемых замен без отправки на сайт.</p>"
+
+            "<p><b>=== Добавить перевод ===</b></p>"
+            "<p>Загрузка перевода из файла. Количество строк в файле должно <b>точно</b> совпадать "
+            "с числом фрагментов на сайте (с галкой «Непереведённое» — только с числом непереведённых). "
+            "При несовпадении появится «Length mismatch». Пустые строки файла пропускаются.</p>"
+
+            "<p><b>=== Форматы файлов ===</b></p>"
+            "<p>Файлы должны быть в кодировке <b>UTF-8</b>. Сохраняйте в блокноте через «Сохранить как → UTF-8».<br/>"
+            "• .txt — читается построчно. Каждый перенос = отдельная строка. Пустые строки в середине файла сохраняются.<br/>"
+            "• .json — плоский список строк: [«строка 1», «строка 2», ...]. Перенос внутри строки пишется как <b>\\n</b> "
+            "(два символа: обратный слэш и n), на сайте станет &lt;br&gt;.</p>"
+
+            "<p><b>=== Полезно знать ===</b><br/>"
+            "• CSRF-токен обновляется автоматически. Если сессия протухла — программа подтянет новый и повторит запрос.<br/>"
+            "• Закрытие окна во время работы пытается прервать задачу, но 1-2 запроса могут не успеть. "
+            "На сайте останется частично изменённое состояние — очистите «Файл оригинала с сайта» и перезапустите.<br/>"
+            "• Для замены в нескольких книгах: запустите «Заменить» несколько раз, каждый раз с URL новой книги.</p>"
+
+            "</body></html>"
+        )
+
+    def _connect(self):
+        self.actionRestart.triggered.connect(restart)
+        self.actionnotabenoid_org.triggered.connect(self._open_site)
+        self.actionGithub_com.triggered.connect(lambda: webbrowser.open(GITHUB_URL))
+        self.actionQuit.triggered.connect(self.close)
+
+        self.login.textEdited.connect(self._on_login_edit)
+        self.password.textEdited.connect(self._on_password_edit)
+        self.urlBook.textEdited.connect(self._on_url_edit)
+
+        self.comboBox.currentIndexChanged.connect(self._on_combo)
+        self.tabWidget.currentChanged.connect(self._on_tab)
+        self.logBox.toggled.connect(self._on_dry_run)
+        self.logBox.toggled.connect(self.replaceDryCheck.setChecked)
+        self.replaceDryCheck.toggled.connect(self.logBox.setChecked)
+
+        self.btnBrowseOld.clicked.connect(lambda: self._pick_file(self.fileNameOld))
+        self.btnBrowseNew.clicked.connect(lambda: self._pick_file(self.fileNameNew))
+        self.btnBrowseTrans.clicked.connect(lambda: self._pick_file(self.fileNameTrans))
+        self.btnBrowseSave.clicked.connect(self._pick_save)
+
+        self.btnFormat.clicked.connect(
+            lambda: self._pick_file(
+                self.lineEditFormat,
+                "JSON files (*.json);;All files (*)",
+            )
+        )
+
+        self.btnStartAdd.clicked.connect(self._start)
+        self.btnStartRefresh.clicked.connect(self._start)
+        self.btnStartDownload.clicked.connect(self._start)
+        self.btnStartReplace.clicked.connect(self._start)
+        self.btnStartTrans.clicked.connect(self._start)
+
+    def _open_site(self):
+        url = self.urlBook.text().strip()
+        if url:
+            webbrowser.open(url)
+
+    def _on_login_edit(self, value):
+        if self.radioButton.isChecked():
+            self.config.save_login(value)
+
+    def _on_password_edit(self, value):
+        if self.radioButton.isChecked():
+            self.config.save_password(value)
+
+    def _on_url_edit(self, value):
+        if self.radioButton_url.isChecked():
+            self.config.save_url(value)
+
+    def _on_tab(self, index):
+        is_replace = index == int(Tab.REPLACE)
+        self.urlBook.setEnabled(not is_replace)
+        self.urlBookText.setEnabled(not is_replace)
+        self._update_nt_state()
+
+    def _on_combo(self, index):
+        is_orig = index == int(DownloadKind.ORIGINAL)
+        self.radioButton_insert.setVisible(not is_orig)
+        self.radioButton_insert.setDisabled(is_orig)
+        self._update_nt_state()
+
+    def _update_nt_state(self):
+        """«Непереведённое» активно только там, где реально используется.
+        Disabled, а не hidden — чтобы layout не сдвигался."""
+        tab = self.tabWidget.currentIndex()
+        if tab == int(Tab.DOWNLOAD):
+            enabled = self.comboBox.currentIndex() == int(DownloadKind.ORIGINAL)
+        elif tab == int(Tab.ADD_TRANS):
+            enabled = True
+        else:
+            enabled = False
+        self.radioButton_non_trans.setEnabled(enabled)
+
+    def _on_dry_run(self):
+        dry = self.logBox.isChecked()
+        running = self.thread is not None and self.thread.isRunning()
+        for n in ("btnStartRefresh", "btnStartDownload", "btnStartTrans"):
+            getattr(self, n).setDisabled(dry or running)
+        self.btnStartAdd.setDisabled(running)
+        self.btnStartReplace.setDisabled(running)
+
+    def _pick_file(self, line_edit, name_filter=None):
+        if name_filter is None:
+            name_filter = (
+                "Data files (*.txt *.json);;"
+                "Text files (*.txt);;"
+                "JSON files (*.json);;"
+                "All files (*)"
+            )
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select file", "", name_filter
+        )
+        if path:
+            line_edit.setText(path)
+
+    def _pick_save(self):
+        dialog = QtWidgets.QFileDialog(self, "Save file")
+        dialog.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dialog.setNameFilters([
+            "Text file (*.txt)",
+            "JSON file (*.json)",
+            "All files (*)",
+        ])
+        if not dialog.exec():
+            return
+        files = dialog.selectedFiles()
+        if not files:
+            return
+        path = files[0]
+        if not os.path.splitext(path)[1]:
+            chosen = dialog.selectedNameFilter().lower()
+            path += ".json" if "json" in chosen else ".txt"
+        self.lineEditSave.setText(path)
+
+    def _start(self):
+        if self.thread is not None and self.thread.isRunning():
+            return
+
+        try:
+            tab = Tab(self.tabWidget.currentIndex())
+        except ValueError:
+            return
+
+        try:
+            state = self._build_state(tab)
+        except ValueError as exc:
+            QMessageBox.critical(self, "Input error", str(exc))
+            return
+        if state is None:
+            return
+
+        self.running_tab = tab
+        self._clear_log(tab)
+        self._log(str(datetime.datetime.now())[:19])
+        self._set_running_ui(True)
+
+        self.thread = TaskThread(state)
+        self.thread.task_started.connect(self._log)
+        self.thread.task_finished.connect(self._log)
+        self.thread.task_finished.connect(lambda _: self._set_running_ui(False))
+        self.thread.progress_text.connect(self._log)
+        self.thread.progress_value.connect(self._progress)
+        try:
+            self.thread.start()
+        except Exception as exc:
+            self._set_running_ui(False)
+            QMessageBox.critical(self, "Thread error", str(exc))
+
+    def _build_state(self, tab: Tab) -> Optional[RunState]:
+        dry = self.logBox.isChecked()
+        state = RunState(
+            tab=tab,
+            dry_run=dry,
+            login=self.login.text(),
+            password=self.password.text(),
+        )
+
+        url = self.urlBook.text().strip()
+        state.book_url = url
+
+        if tab == Tab.ADD:
+            old_path = self.fileNameOld.text().strip()
+            new_path = self.fileNameNew.text().strip()
+            if not new_path:
+                raise ValueError("Выберите новый файл оригинала")
+            if not url and not (old_path and new_path):
+                raise ValueError(
+                    "Введите URL книги — он нужен, чтобы скачать текущий оригинал с сайта"
+                )
+            state.f1_data = read_lines(old_path) if old_path else []
+            state.f2_data = read_lines(new_path)
+            state.comment = self.comment.text()
+            return state
+
+        if tab == Tab.REPLACE:
+            main_url = self.url_main_text.text().strip().rstrip("/")
+            if main_url.startswith("http://notabenoid.org"):
+                main_url = main_url.replace("http://notabenoid.org",
+                                            "https://notabenoid.org", 1)
+            state.main_url = main_url
+            # strip снимает случайные пробелы и переносы с концов
+            state.search_text = self.replace_text_orig.toPlainText().strip()
+            # replacement НЕ strip'им — пользователь может специально
+            # вставить пустую строку или строку с отступами
+            state.replacement = self.replacement_text.toPlainText()
+            state.replace_entire = self.radioButton_replace.isChecked()
+            if not state.main_url:
+                raise ValueError(
+                    "Введите URL книги или главы: "
+                    "https://notabenoid.org/book/NNN "
+                    "или https://notabenoid.org/book/NNN/MMM"
+                )
+            if not state.search_text:
+                raise ValueError("Введите текст для замены")
+            return state
+
+        if not url:
+            raise ValueError("Введите URL книги")
+
+        if tab == Tab.REFRESH:
+            try:
+                state.start_line = int(self.lineNumber.text() or "1")
+            except ValueError:
+                state.start_line = 1
+        elif tab == Tab.DOWNLOAD:
+            state.download_kind = DownloadKind(self.comboBox.currentIndex())
+            state.only_untranslated = self.radioButton_non_trans.isChecked()
+            state.insert_from_original = self.radioButton_insert.isChecked()
+            state.save_path = self.lineEditSave.text().strip()
+            state.json_template = self.lineEditFormat.text().strip()
+        elif tab == Tab.ADD_TRANS:
+            state.translation_file = self.fileNameTrans.text().strip()
+            state.only_untranslated = self.radioButton_non_trans.isChecked()
+            if not state.translation_file:
+                raise ValueError("Выберите файл перевода")
+        return state
+
+    def _clear_log(self, tab: Tab):
+        {
+            Tab.ADD: self.logBoxAdd, Tab.REFRESH: self.logBoxRefresh,
+            Tab.DOWNLOAD: self.logBoxDownload, Tab.REPLACE: self.logBoxReplace,
+            Tab.ADD_TRANS: self.logBoxTrans,
+        }[tab].clear()
+
+    def _log(self, text: str):
+        _write_log(text)
+        if self.running_tab is None:
+            return
+        box = {
+            Tab.ADD: self.logBoxAdd, Tab.REFRESH: self.logBoxRefresh,
+            Tab.DOWNLOAD: self.logBoxDownload, Tab.REPLACE: self.logBoxReplace,
+            Tab.ADD_TRANS: self.logBoxTrans,
+        }.get(self.running_tab)
+        if box:
+            box.append(text)
+
+    def _progress(self, value: int):
+        if self.running_tab == Tab.REFRESH:
+            self.progressBarRefresh.setValue(value)
+        elif self.running_tab == Tab.DOWNLOAD:
+            self.progressBarDownload.setValue(value)
+
+    def _set_running_ui(self, running: bool):
+        self.btnStartAdd.setDisabled(running)
+        if not self.logBox.isChecked():
+            for n in ("btnStartRefresh", "btnStartDownload",
+                      "btnStartTrans"):
+                getattr(self, n).setDisabled(running)
+        # «Заменить» активна и в dry-run, и без; но на время работы — disabled
+        self.btnStartReplace.setDisabled(running)
+        self.logBox.setDisabled(running)
+        self.replaceDryCheck.setDisabled(running)
+
+    def closeEvent(self, event):
+        if self.thread and self.thread.isRunning():
+            self.thread.stop()
+            self.thread.wait(2000)
+        if self.radioButton_url.isChecked() and self.urlBook.text().strip():
+            self.config.save_url(self.urlBook.text().strip())
+        event.accept()
 
 
-def id_books():
+# --------------------------------------------------------------------------- #
+# misc
+# --------------------------------------------------------------------------- #
+
+def _write_log(text: str):
     try:
-        temp_d = []
-        temp_n = []
-        page = session.get(url_book_main, headers=headers)
-
-        while page.status_code != 200:
-            page = session.get(url_book_main, headers=headers)
-        soup = BeautifulSoup(page.text, "html.parser")
-        # add title
-        number_chapter = soup.find_all('tbody')[0].find_all('tr')
-
-        for i_nc in number_chapter:
-            temp_d.append(i_nc.get('data-id'))
-        name_chapter = soup.find_all('tbody')[0].find_all('td', class_='t')
-        for i_n in name_chapter:
-            temp_n.append(i_n.text)
-
-        return temp_d, temp_n
-    except Exception:
-        return 'error', 'error'
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n")
+    except OSError:
+        pass
 
 
 def restart():
-    os.execl(executable, os.path.abspath(__file__), *argv)
+    os.execl(sys.executable, os.path.abspath(__file__), *sys.argv)
 
 
-def menu_site_github():
-    webbrowser.open("https://github.com/chromKa/Notabenoid_Tool")
-
-
-def add_str(id_hash, str_body):
-    data1 = {
-        'Orig[ord]': id_hash,
-        'Orig[body]': str_body,
-        'ajax': '1',
-    }
-    result = session.post(url_book + '/' + "0" + '/edit', headers=headers, data=data1, verify=False)
-    if result.status_code == requests.codes.ok:
-        return
-    else:
-        return 'error'
-
-
-def change_str(id_hash, str_body):
-    id_url_str = get_id(id_hash)
-    if id_url_str == 'error':
-        return 'error'
-    data1 = {
-        'Orig[ord]': id_hash,
-        'Orig[body]': str_body,
-        'ajax': '1',
-    }
-
-    result = session.post(url_book + '/' + id_url_str + '/edit', headers=headers, data=data1, verify=False)
-    if result.status_code == requests.codes.ok:
-        return
-    else:
-        return 'error'
-
-
-def delete_str(id_hash):
-    id_url_str = get_id(id_hash)
-    if id_url_str == 'error':
-        return 'error'
-    result = session.post(url_book + '/' + id_url_str + '/remove', headers=headers, verify=False)
-    if result.status_code == requests.codes.ok:
-        return
-    else:
-        return 'error'
-
-
-def get_id(id_hash):
-    try:
-        page = math.ceil(id_hash / 50)
-        url_parce = url_book + '?Orig_page=' + str(page)
-        list_ids = create_list_ids(url_parce)
-        num_str = math.floor(id_hash - 50 * (page - 1))
-
-        return list_ids[num_str - 1]
-    except Exception:
-        return 'error'
-
-
-def last_page_nt():
-    page = session.get(url_book + '?show=1', headers=headers)
-
-    while page.status_code != 200:
-        page = session.get(url_book + '?show=1', headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter = soup.find_all('ul', class_='selectable')
-    np = []
-    for i in number_chapter:
-        np = (i.find_all('a'))
-    if len(np) > 0:
-        return np[-1].get_text()
-    else:
-        return 1
-
-
-def last_page():
-    page = session.get(url_book, headers=headers)
-
-    while page.status_code != 200:
-        page = session.get(url_book, headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter = soup.find_all('ul', class_='selectable')
-    np = []
-    for i in number_chapter:
-        np = (i.find_all('a'))
-    if len(np) > 0:
-        return np[-1].get_text()
-    else:
-        return 1
-
-
-def create_list_ids(url_parce):
-    page = session.get(url_parce, headers=headers)
-    while page.status_code != 200:
-        page = session.get(url_parce, headers=headers)
-    soup = BeautifulSoup(page.text, "html.parser")
-    number_chapter_id = []
-    # add title
-    number_chapter = soup.find_all('tr')
-    for i_nc in number_chapter:
-        number_chapter_id.append(i_nc.get('id'))
-
-    number_chapter_id.remove(None)
-    number_chapter_id_str = []
-    for i_nc_id in number_chapter_id:
-        temp_str = str(i_nc_id)
-        number_chapter_id_str.append(temp_str.replace("o", ""))
-    if len(number_chapter_id_str) > 0:
-        return number_chapter_id_str
-
-
-# Application entry point
-if __name__ == '__main__':
+if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyle('Fusion')
+    app.setStyle("Fusion")
     freeze_support()
-    # Create and show the main window
     window = MainWindow()
     window.show()
-
-    # Start the application event loop
     sys.exit(app.exec())

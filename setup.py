@@ -1,28 +1,80 @@
+import os
 from cx_Freeze import setup, Executable
-# python setup.py build
-executables = [Executable('C:\\Users\\Комп\\PycharmProjects\\NotabenoidTool\\main.py',
-                          base='Win32GUI', icon='C:\\Users\\Комп\\PycharmProjects\\NotabenoidTool\\resource\\Untitled-1.ico')]
 
-includes = ['os', 'datetime', 'webbrowser', 'sys', 'difflib', 'requests', 'bs4', 'math', 'PyQt6', 'time',
-            ]
+# Папка, где лежит setup.py — все пути считаются от неё
+HERE = os.path.dirname(os.path.abspath(__file__))
 
-zip_include_packages = ['os', 'datetime', 'webbrowser', 'sys', 'difflib', 'requests', 'bs4', 'math', 'PyQt6', 'time',
-                        ]
+executables = [
+    Executable(
+        script=os.path.join(HERE, "main.py"),
+        base="Win32GUI",                       # без консоли
+        icon=os.path.join(HERE, "resource", "Untitled-1.ico"),
+        target_name="NotabenoidTool.exe",
+    )
+]
 
-# include_files = ['C:\\Users\\Комп\\PycharmProjects\\NotabenoidTool\\replace.py']
+# Только локальные модули, которые могут не подхватиться автоматически
+includes = [
+    "main_ui",
+    "res",
+]
+
+# Пакеты со своими DLL/бинарниками — НИКОГДА в zip
+zip_include_packages = []          # оставь пустым
+
+# Пакеты, которые cx_Freeze может не заметить (редко, но бывает)
+packages = [
+    "PyQt6",
+    "requests",
+    "bs4",
+    "urllib3",
+]
+
 
 options = {
-    'build_exe': {
-        'include_msvcr': True,
-        'includes': includes,
-        'zip_include_packages': zip_include_packages,
-        'build_exe': 'build_windows',
-        # 'include_files': include_files,
+    "build_exe": {
+        "include_msvcr": True,
+        "includes": includes,
+        "packages": packages,
+        "zip_include_packages": zip_include_packages,
+        "excludes": [
+            # Убираем тяжёлые неиспользуемые модули Qt
+            "PyQt6.QtWebEngineCore",
+            "PyQt6.QtWebEngineWidgets",
+            "PyQt6.QtWebEngineQuick",
+            "PyQt6.QtQuick",
+            "PyQt6.QtQml",
+            "PyQt6.QtMultimedia",
+            "PyQt6.QtMultimediaWidgets",
+            "PyQt6.QtBluetooth",
+            "PyQt6.QtNetworkAuth",
+            "PyQt6.QtPositioning",
+            "PyQt6.QtSerialPort",
+            "PyQt6.QtSql",
+            "PyQt6.QtTest",
+            "PyQt6.QtSensors",
+            "PyQt6.QtCharts",
+            "PyQt6.QtDataVisualization",
+            "PyQt6.Qt3DCore",
+            # Стандартные библиотеки, которые точно не нужны
+            "tkinter",
+            "unittest",
+            "http.server",
+            "pydoc",
+            "pdb",
+            "doctest",
+            "distutils",
+            "setuptools",
+            "pip",
+        ],
+        "build_exe": os.path.join(HERE, "build_windows"),
     }
 }
 
-setup(name='Notabenoid_Tool',
-      version='1.3.0',
-      description='Notabenoid_Tool',
-      executables=executables,
-      options=options)
+setup(
+    name="Notabenoid_Tool",
+    version="2.0",
+    description="Notabenoid Tool",
+    executables=executables,
+    options=options,
+)
