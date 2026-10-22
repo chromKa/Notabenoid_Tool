@@ -1270,6 +1270,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.config.load()
         self.thread: Optional[TaskThread] = None
         self.running_tab: Optional[Tab] = None
+        self._dry_run_saved = False
 
         self._init_fonts()
         self._init_state()
@@ -1528,6 +1529,18 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         is_replace = index == int(Tab.REPLACE)
         self.urlBook.setEnabled(not is_replace)
         self.urlBookText.setEnabled(not is_replace)
+
+        # На вкладках, где dry-run имеет смысл (ADD, REPLACE) — восстанавливаем
+        # сохранённое состояние. На остальных — автоматически снимаем галку,
+        # чтобы кнопки «Начать» были активны.
+        if index in (int(Tab.ADD), int(Tab.REPLACE)):
+            if self._dry_run_saved and not self.logBox.isChecked():
+                self.logBox.setChecked(True)
+        else:
+            if self.logBox.isChecked():
+                self._dry_run_saved = True
+                self.logBox.setChecked(False)
+
         self._update_nt_state()
 
     def _on_combo(self, index):
@@ -1550,9 +1563,20 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 
     def _on_dry_run(self):
         dry = self.logBox.isChecked()
+
+        # Запоминаем состояние только когда мы на подходящей вкладке.
+        # На REFRESH/DOWNLOAD/ADD_TRANS галка снимается через _on_tab,
+        # но не должна затирать сохранённое значение.
+        current = self.tabWidget.currentIndex()
+        if current in (int(Tab.ADD), int(Tab.REPLACE)):
+            self._dry_run_saved = dry
+
+        # Кнопки блокируются только на время работы задачи.
+        # В dry-run кнопки на «неподходящих» вкладках уже будут
+        # разблокированы через _on_tab (галка снята).
         running = self.thread is not None and self.thread.isRunning()
         for n in ("btnStartRefresh", "btnStartDownload", "btnStartTrans"):
-            getattr(self, n).setDisabled(dry or running)
+            getattr(self, n).setDisabled(running)
         self.btnStartAdd.setDisabled(running)
         self.btnStartReplace.setDisabled(running)
 
@@ -1719,14 +1743,12 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 
     def _set_running_ui(self, running: bool):
         self.btnStartAdd.setDisabled(running)
-        if not self.logBox.isChecked():
-            for n in ("btnStartRefresh", "btnStartDownload",
-                      "btnStartTrans"):
-                getattr(self, n).setDisabled(running)
-        # «Заменить» активна и в dry-run, и без; но на время работы — disabled
-        self.btnStartReplace.setDisabled(running)
+        for n in ("btnStartRefresh", "btnStartDownload",
+                  "btnStartTrans", "btnStartReplace"):
+            getattr(self, n).setDisabled(running)
         self.logBox.setDisabled(running)
-        self.replaceDryCheck.setDisabled(running)
+        if hasattr(self, "replaceDryCheck"):
+            self.replaceDryCheck.setDisabled(running)
 
     def closeEvent(self, event):
         if self.thread and self.thread.isRunning():
