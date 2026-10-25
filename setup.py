@@ -73,7 +73,7 @@ options = {
 
 setup(
     name="Notabenoid_Tool",
-    version="2.0",
+    version="2.1",
     description="Notabenoid Tool",
     executables=executables,
     options=options,

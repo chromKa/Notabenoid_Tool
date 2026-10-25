@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import webbrowser
 
@@ -26,9 +27,16 @@ import requests
 import urllib3
 from bs4 import BeautifulSoup
 from PyQt6 import QtGui, QtWidgets
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import (
+    QThread, pyqtSignal, Qt, QAbstractTableModel, QModelIndex, QTimer,
+)
 from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPalette
-from PyQt6.QtWidgets import QApplication, QMainWindow, QMessageBox
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QMessageBox, QDialog,
+    QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QTableView, QHeaderView,
+    QAbstractItemView, QPlainTextEdit,
+)
 
 import main_ui as design
 import res  # noqa: F401  (Qt resources)
@@ -48,6 +56,41 @@ TIMEOUT = (5, 30)
 PAGE_SIZE = 50
 LIB_DIR = "./lib"
 LOG_FILE = "notabenoid_log.txt"
+
+# --------------------------------------------------------------------------- #
+# Buffered, thread-safe logger
+# --------------------------------------------------------------------------- #
+
+_log_lock = threading.Lock()
+_log_buffer: list[str] = []
+_LOG_FLUSH_THRESHOLD = 32
+
+
+def _flush_log_locked():
+    global _log_buffer
+    if not _log_buffer:
+        return
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.writelines(_log_buffer)
+    except OSError:
+        pass
+    finally:
+        _log_buffer = []
+
+
+def _write_log(text: str):
+    line = text.rstrip() + "\n"
+    with _log_lock:
+        _log_buffer.append(line)
+        is_worker = threading.current_thread() is not threading.main_thread()
+        if is_worker or len(_log_buffer) >= _LOG_FLUSH_THRESHOLD:
+            _flush_log_locked()
+
+
+def _flush_log():
+    with _log_lock:
+        _flush_log_locked()
 
 
 class Tab(IntEnum):
@@ -117,11 +160,22 @@ class Config:
 # --------------------------------------------------------------------------- #
 
 class Http:
+    WRITE_THROTTLE = 0.1
+
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
         self.csrf_refresh_callback = None
         self.csrf_token: Optional[str] = None
+        self._last_write_ts = 0.0
+
+    def _throttle(self) -> None:
+        """Не даёт write-запросам идти чаще, чем раз в WRITE_THROTTLE."""
+        now = time.monotonic()
+        delta = now - self._last_write_ts
+        if delta < self.WRITE_THROTTLE:
+            time.sleep(self.WRITE_THROTTLE - delta)
+        self._last_write_ts = time.monotonic()
 
     def login(self, login: str, password: str) -> bool:
         login_url = "https://notabenoid.org/login"
@@ -176,6 +230,7 @@ class Http:
 
     def post(self, url: str, data=None, extra_headers=None) -> bool:
         for attempt in range(2):
+            self._throttle()
             headers = {}
             if self.csrf_token:
                 headers["X-CSRFToken"] = self.csrf_token
@@ -197,6 +252,7 @@ class Http:
 
     def delete(self, url: str, extra_headers=None) -> bool:
         for attempt in range(2):
+            self._throttle()
             headers = {}
             if self.csrf_token:
                 headers["X-CSRFToken"] = self.csrf_token
@@ -297,7 +353,36 @@ class SiteClient:
         headers = {"HX-Request": "true", "HX-Target": f"o{rid}"}
         return self.http.delete(url, extra_headers=headers)
 
-    def refresh_ids_from(self, start_line: int, log=None) -> None:
+    def _find_text_p(self, rid: str, soup: BeautifulSoup):
+        """Ищет <p class="text"> у строки с заданным rid в soup."""
+        if soup is None:
+            return None
+        for tr in soup.find_all("tr"):
+            if str(tr.get("id", "")) != f"o{rid}":
+                continue
+            p = tr.find("p", class_="text")
+            if p is not None:
+                return p
+        return None
+
+    def refresh_ids_from(
+            self,
+            start_line: int,
+            log=None,
+            should_stop=None,
+    ) -> int:
+        """Перенумеровывает ord всех строк начиная с start_line.
+
+        Возвращает число строк, для которых POST не удался. Если >0 —
+        нумерация могла сбиться, нужен повторный запуск.
+
+        Если у строки не найден <p class="text"> — один раз перезагружаем
+        страницу и ищем строку по rid. Если и во второй раз не нашли —
+        прерываем refresh с ненулевым fail_count: продолжать бессмысленно,
+        ord всех последующих строк всё равно сдвинуты.
+
+        Если should_stop() вернёт True, обработка прерывается.
+        """
         last = self.last_page()
         start_page = math.ceil(start_line / PAGE_SIZE)
         ordinal = start_page * PAGE_SIZE - (PAGE_SIZE - 1)
@@ -307,26 +392,56 @@ class SiteClient:
 
         ok_count = 0
         fail_count = 0
+        consecutive_csrf_fails = 0
+        consecutive_forbidden = 0
 
         for page in range(start_page, last + 1):
+            if should_stop and should_stop():
+                if log:
+                    log("refresh: остановлено пользователем")
+                return fail_count + 1
+
             soup = self.http.soup(self.page_url(page))
             if not soup:
                 if log:
                     log(f"  страница {page}/{last} не загрузилась — пропускаю")
                 fail_count += PAGE_SIZE
+                ordinal += PAGE_SIZE
                 continue
             tbody = soup.find_all("tbody")
             if not tbody:
                 continue
 
             for row in tbody[0].find_all("tr"):
+                if should_stop and should_stop():
+                    if log:
+                        log("refresh: остановлено пользователем")
+                    return fail_count + 1
+
                 rid_raw = row.get("id")
                 if not rid_raw or not str(rid_raw).startswith("o"):
                     continue
                 rid = str(rid_raw)[1:]
 
                 p = row.find("p", class_="text")
-                current_body = p.get_text(separator="\n").rstrip() if p else ""
+                if p is None:
+                    # Аномалия: либо неполный ответ, либо разметка изменилась.
+                    # Перезапрашиваем страницу один раз и ищем строку по rid.
+                    if log:
+                        log(f"ord={ordinal} rid={rid} — "
+                            f"<p class='text'> не найден, перезапрашиваю "
+                            f"страницу {page}…")
+                    retry_soup = self.http.soup(self.page_url(page))
+                    p = self._find_text_p(rid, retry_soup)
+                    if p is None:
+                        if log:
+                            log(f"ord={ordinal} rid={rid} — КРИТИЧНО: "
+                                f"<p class='text'> не найден даже после "
+                                f"повторной загрузки. Прерываю refresh — "
+                                f"нумерация последующих строк могла сбиться.")
+                        return fail_count + 1
+
+                current_body = _extract_ptext(p).rstrip()
 
                 url = f"{self.book_url}/{rid}/edit"
                 data = {"ord": ordinal, "body": current_body}
@@ -335,16 +450,19 @@ class SiteClient:
                     headers["X-CSRFToken"] = self.http.csrf_token
 
                 try:
+                    self.http._throttle()
                     r = self.http.session.post(
                         url, data=data, headers=headers,
                         timeout=TIMEOUT, verify=False,
                     )
                     if r.status_code in (419, 403):
                         if log:
-                            log(f"ord={ordinal} rid={rid} — сессия протухла, обновляю токен…")
+                            log(f"ord={ordinal} rid={rid} — сессия протухла, "
+                                f"обновляю токен…")
                         self.refetch_csrf()
                         if self.http.csrf_token:
                             headers["X-CSRFToken"] = self.http.csrf_token
+                        self.http._throttle()
                         r = self.http.session.post(
                             url, data=data, headers=headers,
                             timeout=TIMEOUT, verify=False,
@@ -353,21 +471,45 @@ class SiteClient:
                     if r.status_code == 200:
                         status = "OK"
                         ok_count += 1
+                        consecutive_csrf_fails = 0
+                        consecutive_forbidden = 0
                     elif r.status_code == 403:
                         status = "ОТКАЗ (403): нет прав на редактирование"
                         fail_count += 1
+                        consecutive_csrf_fails = 0
+                        consecutive_forbidden += 1
+                        if consecutive_forbidden >= 3:
+                            if log:
+                                log(f"ord={ordinal} rid={rid} — {status}")
+                                log("⚠ 3×403 подряд — нет прав на "
+                                    "редактирование. Прерываю refresh, "
+                                    "чтобы не тратить время.")
+                            return fail_count + 1
                     elif r.status_code == 404:
                         status = "НЕ НАЙДЕНО (404): строка удалена?"
                         fail_count += 1
+                        consecutive_csrf_fails = 0
+                        consecutive_forbidden = 0
                     elif r.status_code == 419:
                         status = "CSRF-ТОКЕН УСТАРЕЛ (419)"
                         fail_count += 1
+                        consecutive_forbidden = 0
+                        consecutive_csrf_fails += 1
+                        if consecutive_csrf_fails >= 3:
+                            if log:
+                                log("⚠ 3×419 подряд — сессия потеряна. "
+                                    "Прерываю refresh.")
+                            return fail_count + 1
                     elif r.status_code >= 500:
                         status = f"ОШИБКА СЕРВЕРА ({r.status_code})"
                         fail_count += 1
+                        consecutive_csrf_fails = 0
+                        consecutive_forbidden = 0
                     else:
                         status = f"НЕОЖИДАННЫЙ ОТВЕТ ({r.status_code})"
                         fail_count += 1
+                        consecutive_csrf_fails = 0
+                        consecutive_forbidden = 0
 
                     if log:
                         log(f"ord={ordinal} rid={rid} — {status}")
@@ -383,9 +525,11 @@ class SiteClient:
         if log:
             if fail_count:
                 log(f"refresh: готово. Успешно: {ok_count}, ошибок: {fail_count}")
-                log("⚠ Некоторые строки не обновились — запустите «Обновить ID» ещё раз.")
+                log("⚠ Некоторые строки не обновились — "
+                    "запустите «Обновить ID» ещё раз.")
             else:
                 log(f"refresh: готово. Все {ok_count} строк обновлены.")
+        return fail_count
 
     def add_comment(self, ordinal: int, text: str) -> bool:
         rid = self.get_row_id(ordinal)
@@ -455,14 +599,17 @@ def read_lines(path: str) -> list[str]:
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
 
-    # 1. Строгий JSON
+    # BOM (U+FEFF) в начале файла сломал бы сравнение первой строки
+    # с сайтом и уехал бы на сайт при add/refresh. Срезаем.
+    if content.startswith("\ufeff"):
+        content = content[1:]
+
     try:
         data = json.loads(content)
         return [str(x) for x in flatten(data)]
     except json.JSONDecodeError:
         pass
 
-    # 2. Мягкий JSON: разрешает raw newline/tab внутри строк
     try:
         data = json.loads(content, strict=False)
         _write_log(f"WARN: {path} — невалидный JSON, распарсен мягко")
@@ -470,7 +617,6 @@ def read_lines(path: str) -> list[str]:
     except json.JSONDecodeError:
         pass
 
-    # 3. Текст
     lines = content.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]
@@ -499,6 +645,21 @@ def write_lines(path: str, lines: list[str], json_template: str = "") -> None:
         with open(path, "w", encoding="utf-8") as f:
             f.writelines(f"{line}\n" for line in lines)
 
+
+def _extract_ptext(p) -> str:
+    """Текст из <p class="text">, где только <br> становится "\\n".
+
+    get_text(separator="\\n") НЕЛЬЗЯ — он вставляет переводы строк вокруг
+    любых inline-тегов. На странице с фильтром ?show=6&tt=... notabenoid
+    подсвечивает совпадения в <span class="shl">, и в извлечённом тексте
+    появляются лишние "\\n" вокруг искомого слова. При отправке обратно
+    сервер превращает их в <br> — на сайте появляются лишние разрывы.
+    """
+    if p is None:
+        return ""
+    for br in p.find_all("br"):
+        br.replace_with("\n")
+    return p.get_text()
 
 # --------------------------------------------------------------------------- #
 # RunState
@@ -537,6 +698,843 @@ class RunState:
 
 
 # --------------------------------------------------------------------------- #
+# Diff side-by-side preview
+# --------------------------------------------------------------------------- #
+
+def _compute_diff_stats(opcodes):
+    total_blocks = adds = deletes = replaces = 0
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            continue
+        total_blocks += 1
+        old_len = i2 - i1
+        new_len = j2 - j1
+        if tag == "replace":
+            replaces += min(old_len, new_len)
+            if new_len > old_len:
+                adds += new_len - old_len
+            elif old_len > new_len:
+                deletes += old_len - new_len
+        elif tag == "insert":
+            adds += new_len
+        elif tag == "delete":
+            deletes += old_len
+    return total_blocks, adds, deletes, replaces
+
+
+def _filter_opcodes_with_context(opcodes, context=3):
+    if not opcodes:
+        return opcodes
+    result = []
+    n = len(opcodes)
+    for idx, op in enumerate(opcodes):
+        tag = op[0]
+        if tag != "equal":
+            result.append(op)
+            continue
+        _, i1, i2, j1, j2 = op
+        length = i2 - i1
+        if length <= 2 * context:
+            result.append(op)
+            continue
+        is_first = idx == 0
+        is_last = idx == n - 1
+        if is_first:
+            result.append(("equal", i1, i1 + context, j1, j1 + context))
+            result.append(("skip", i1 + context, i2, j1 + context, j2))
+        elif is_last:
+            result.append(("skip", i1, i2 - context, j1, j2 - context))
+            result.append(("equal", i2 - context, i2, j2 - context, j2))
+        else:
+            result.append(("equal", i1, i1 + context, j1, j1 + context))
+            result.append(("skip",
+                           i1 + context, i2 - context,
+                           j1 + context, j2 - context))
+            result.append(("equal", i2 - context, i2, j2 - context, j2))
+    return result
+
+
+class DiffTableModel(QAbstractTableModel):
+    """Плоская модель diff-таблицы.
+
+    Каждая строка хранится как кортеж (tag, onum, otext, nnum, ntext),
+    где tag — одно из: "skip", "equal", "delete", "insert",
+    "replace:rep", "replace:del", "replace:ins".
+    """
+
+    HEADERS = ["№", "Старый файл", "№", "Новый файл"]
+
+    C_EQ_BG = QColor(23, 23, 23)
+    C_DEL_BG = QColor(74, 31, 31)
+    C_DEL_FG = QColor(255, 153, 153)
+    C_INS_BG = QColor(31, 74, 31)
+    C_INS_FG = QColor(153, 255, 153)
+    C_REP_L_BG = QColor(74, 66, 32)
+    C_REP_L_FG = QColor(255, 221, 136)
+    C_REP_R_BG = QColor(92, 82, 40)
+    C_REP_R_FG = QColor(255, 238, 153)
+    C_SKIP_BG = QColor(42, 42, 42)
+    C_SKIP_FG = QColor(136, 136, 136)
+    C_NUM_FG = QColor(102, 102, 102)
+    C_TEXT = QColor(220, 220, 220)
+
+    def __init__(self, old_lines, new_lines, opcodes, parent=None):
+        super().__init__(parent)
+        total_lines = max(len(old_lines), len(new_lines))
+        ops = (_filter_opcodes_with_context(opcodes)
+               if total_lines > 300 else opcodes)
+        self._rows = self._build_rows(old_lines, new_lines, ops)
+
+    @staticmethod
+    def _build_rows(old_lines, new_lines, ops):
+        rows = []
+        for item in ops:
+            tag = item[0]
+
+            if tag == "skip":
+                _, i1, i2, j1, j2 = item
+                rows.append(("skip",
+                             f"… пропущено {i2 - i1} строк без изменений …",
+                             "", "", ""))
+
+            elif tag == "equal":
+                _, i1, i2, j1, j2 = item
+                for k in range(i2 - i1):
+                    o = old_lines[i1 + k] if i1 + k < len(old_lines) else ""
+                    n = new_lines[j1 + k] if j1 + k < len(new_lines) else ""
+                    rows.append(("equal",
+                                 str(i1 + k + 1), o,
+                                 str(j1 + k + 1), n))
+
+            elif tag == "delete":
+                _, i1, i2, j1, j2 = item
+                for k in range(i2 - i1):
+                    rows.append(("delete",
+                                 str(i1 + k + 1), old_lines[i1 + k],
+                                 "", ""))
+
+            elif tag == "insert":
+                _, i1, i2, j1, j2 = item
+                for k in range(j2 - j1):
+                    rows.append(("insert",
+                                 "", "",
+                                 str(j1 + k + 1), new_lines[j1 + k]))
+
+            elif tag == "replace":
+                _, i1, i2, j1, j2 = item
+                old_len = i2 - i1
+                new_len = j2 - j1
+                for k in range(max(old_len, new_len)):
+                    has_old = k < old_len
+                    has_new = k < new_len
+                    o = old_lines[i1 + k] if has_old else ""
+                    onum = str(i1 + k + 1) if has_old else ""
+                    n = new_lines[j1 + k] if has_new else ""
+                    nnum = str(j1 + k + 1) if has_new else ""
+                    if has_old and has_new:
+                        sub = "replace:rep"
+                    elif has_old:
+                        sub = "replace:del"
+                    else:
+                        sub = "replace:ins"
+                    rows.append((sub, onum, o, nnum, n))
+
+        return rows
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 4
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        tag = row[0]
+        col = index.column()
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            return row[col + 1]
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            return self._bg(tag, col)
+
+        if role == Qt.ItemDataRole.ForegroundRole:
+            return self._fg(tag, col)
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            if tag == "skip":
+                return int(Qt.AlignmentFlag.AlignCenter.value)
+            align = Qt.AlignmentFlag.AlignTop
+            if col in (0, 2):
+                align |= Qt.AlignmentFlag.AlignRight
+            else:
+                align |= Qt.AlignmentFlag.AlignLeft
+            return int(align.value)
+
+        return None
+
+    def headerData(self, section, orientation,
+                   role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal \
+                and role == Qt.ItemDataRole.DisplayRole:
+            return self.HEADERS[section]
+        return None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def _bg(self, tag, col):
+        if tag == "skip":
+            return self.C_SKIP_BG
+        if tag == "equal":
+            return self.C_EQ_BG
+        if tag == "delete":
+            return self.C_DEL_BG
+        if tag == "insert":
+            return self.C_INS_BG
+        sub = tag.split(":", 1)[1]
+        if sub == "rep":
+            return self.C_REP_L_BG if col < 2 else self.C_REP_R_BG
+        if sub == "del":
+            return self.C_DEL_BG
+        return self.C_INS_BG
+
+    def _fg(self, tag, col):
+        if tag == "skip":
+            return self.C_SKIP_FG
+        if col in (0, 2):
+            return self.C_NUM_FG
+        if tag == "equal":
+            return self.C_TEXT
+        if tag == "delete":
+            return self.C_DEL_FG if col == 1 else self.C_TEXT
+        if tag == "insert":
+            return self.C_TEXT if col == 1 else self.C_INS_FG
+        sub = tag.split(":", 1)[1]
+        if sub == "rep":
+            return self.C_REP_L_FG if col < 2 else self.C_REP_R_FG
+        if sub == "del":
+            return self.C_DEL_FG if col == 1 else self.C_TEXT
+        return self.C_TEXT if col == 1 else self.C_INS_FG
+
+    def is_skip_row(self, row: int) -> bool:
+        return 0 <= row < len(self._rows) and self._rows[row][0] == "skip"
+
+    def cell_text(self, row: int, col: int) -> str:
+        if not (0 <= row < len(self._rows)):
+            return ""
+        return self._rows[row][col + 1] if col < 4 else ""
+
+
+class DiffPreviewDialog(QDialog):
+    """Side-by-side diff.
+
+    confirm_mode=False — обычное окно-отчёт (dry-run), кнопка «Закрыть».
+    confirm_mode=True  — диалог подтверждения перед изменениями на сайте.
+                         «Применить» → accept(), «Отмена»/Esc/X → reject().
+    """
+
+    def __init__(self, old_lines, new_lines, opcodes, parent=None, *,
+                 confirm_mode: bool = False):
+        super().__init__(parent)
+        self._confirm_mode = confirm_mode
+        self._base_title = (
+            "Подтверждение изменений на сайте"
+            if confirm_mode
+            else "Пробный прогон — сравнение файлов"
+        )
+        self.setWindowTitle(self._base_title)
+        self.resize(1400, 900)
+        self.setWindowIcon(QtGui.QIcon(":/d/Untitled-12.png"))
+        self.setStyleSheet(
+            "background-color: rgb(34, 35, 36); color: rgb(247, 247, 247);"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        total, adds, deletes, replaces = _compute_diff_stats(opcodes)
+        total_lines = adds + deletes + replaces
+
+        header = QHBoxLayout()
+        header.setSpacing(16)
+        lbl_total = QLabel(
+            f"<b>Участков изменений:</b> {total} "
+            f"<span style='color:#888'>(блоков)</span>"
+        )
+        lbl_lines = QLabel(
+            f"<b>Всего строк затронуто:</b> {total_lines}"
+        )
+        lbl_rep = QLabel(
+            f"<b style='color:#ffdd88'>⇄ Заменено пар:</b> {replaces}"
+        )
+        lbl_adds = QLabel(
+            f"<b style='color:#99ff99'>+ Добавлено строк:</b> {adds}"
+        )
+        lbl_dels = QLabel(
+            f"<b style='color:#ff9999'>− Удалено строк:</b> {deletes}"
+        )
+        for lbl in (lbl_total, lbl_lines, lbl_rep, lbl_adds, lbl_dels):
+            header.addWidget(lbl)
+        header.addStretch()
+
+        if self._confirm_mode:
+            cancel_btn = QPushButton("Отмена")
+            cancel_btn.clicked.connect(self.reject)
+            header.addWidget(cancel_btn)
+
+            apply_btn = QPushButton("Применить")
+            apply_btn.setStyleSheet(
+                "QPushButton {"
+                " background-color: rgb(46, 125, 50);"
+                " color: rgb(247, 247, 247);"
+                " padding: 4px 18px;"
+                " border: 1px solid rgb(70, 160, 75);"
+                " border-radius: 3px;"
+                "}"
+                "QPushButton:hover { background-color: rgb(56, 142, 60); }"
+                "QPushButton:pressed { background-color: rgb(36, 105, 40); }"
+            )
+            apply_btn.setDefault(True)
+            apply_btn.setAutoDefault(True)
+            apply_btn.clicked.connect(self.accept)
+            header.addWidget(apply_btn)
+        else:
+            close_btn = QPushButton("Закрыть")
+            close_btn.clicked.connect(self.accept)
+            header.addWidget(close_btn)
+
+        layout.addLayout(header)
+
+        self._model = DiffTableModel(old_lines, new_lines, opcodes, self)
+
+        table = QTableView()
+        table.setStyleSheet(
+            "QTableView {"
+            " background-color: rgb(23, 23, 23);"
+            " color: rgb(220, 220, 220);"
+            " gridline-color: rgb(50, 50, 50);"
+            " border: 1px solid rgb(60, 60, 60);"
+            "}"
+            "QTableView::item { padding: 0px 4px; }"
+            "QHeaderView::section {"
+            " background-color: rgb(42, 42, 42);"
+            " color: rgb(220, 220, 220);"
+            " padding: 4px 8px;"
+            " border: none;"
+            " border-bottom: 1px solid rgb(80, 80, 80);"
+            "}"
+        )
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        table.setWordWrap(False)
+        table.setFont(QFont("Consolas", 10))
+        table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        table.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        try:
+            table.setModel(self._model)
+            for r in range(self._model.rowCount()):
+                if self._model.is_skip_row(r):
+                    table.setSpan(r, 0, 1, 4)
+        finally:
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+
+        hv = table.horizontalHeader()
+        hv.setMinimumSectionSize(40)
+        for col in range(4):
+            hv.setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Interactive
+            )
+        hv.setStretchLastSection(False)
+
+        table.setColumnWidth(0, 60)
+        table.setColumnWidth(2, 60)
+        table.setColumnWidth(1, 400)
+        table.setColumnWidth(3, 400)
+
+        layout.addWidget(table, 1)
+        self._table = table
+
+        table.doubleClicked.connect(self._on_cell_double_clicked)
+        table.setFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_initial_sizing_done", False):
+            return
+        self._initial_sizing_done = True
+        try:
+            total = self._table.viewport().width()
+        except (RuntimeError, AttributeError):
+            return
+        text_space = max(total - 140, 200)
+        half = text_space // 2
+        self._table.setColumnWidth(1, half)
+        self._table.setColumnWidth(3, half)
+
+    def keyPressEvent(self, event):
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self._copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _copy_selection(self):
+        try:
+            indexes = self._table.selectedIndexes()
+            if not indexes:
+                return
+
+            rows: dict[int, dict[int, str]] = {}
+            for idx in indexes:
+                text = self._model.cell_text(idx.row(), idx.column())
+                if "\x00" in text:
+                    text = text.replace("\x00", "")
+                rows.setdefault(idx.row(), {})[idx.column()] = text
+
+            lines = []
+            for row in sorted(rows):
+                cols = rows[row]
+                cells = [cols.get(c, "") for c in sorted(cols)]
+                lines.append("\t".join(cells))
+
+            payload = "\n".join(lines)
+            if len(payload) > 5_000_000:
+                payload = payload[:5_000_000] + "\n… (обрезано)"
+
+            QApplication.clipboard().setText(payload)
+            base = self._base_title
+            self.setWindowTitle(f"{base}  ✓ скопировано")
+            QTimer.singleShot(
+                1200, lambda: self.setWindowTitle(base)
+            )
+        except Exception as exc:
+            _write_log(f"copy selection error: {exc}")
+
+    def _on_cell_double_clicked(self, index: QModelIndex):
+        if not index.isValid():
+            return
+        text = self._model.cell_text(index.row(), index.column())
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Содержимое ячейки")
+        dlg.resize(900, 400)
+        dlg.setStyleSheet(
+            "background-color: rgb(34, 35, 36);"
+            " color: rgb(247, 247, 247);"
+        )
+
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout.setContentsMargins(10, 10, 10, 10)
+        dlg_layout.setSpacing(8)
+
+        editor = QPlainTextEdit()
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor.setFont(QFont("Consolas", 11))
+        editor.setStyleSheet(
+            "QPlainTextEdit {"
+            " background-color: rgb(23, 23, 23);"
+            " color: rgb(220, 220, 220);"
+            " border: 1px solid rgb(60, 60, 60);"
+            "}"
+        )
+        dlg_layout.addWidget(editor, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_copy_all = QPushButton("Копировать всё")
+        btn_copy_all.clicked.connect(
+            lambda: QApplication.clipboard().setText(text)
+        )
+        btn_row.addWidget(btn_copy_all)
+        btn_close = QPushButton("Закрыть")
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        dlg_layout.addLayout(btn_row)
+
+        editor.setFocus()
+        editor.selectAll()
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.exec()
+
+# --------------------------------------------------------------------------- #
+# Replace preview (для вкладки «Заменить»)
+# --------------------------------------------------------------------------- #
+
+class ReplaceTableModel(QAbstractTableModel):
+    """Плоская модель таблицы замен.
+
+    Каждая строка — dict: {chapter, chapter_url, orig_id, tr_id, old, new}.
+    """
+
+    HEADERS = ["Глава", "orig", "tr", "Было", "Стало"]
+
+    C_BG = QColor(23, 23, 23)
+    C_OLD_BG = QColor(74, 31, 31)
+    C_OLD_FG = QColor(255, 153, 153)
+    C_NEW_BG = QColor(31, 74, 31)
+    C_NEW_FG = QColor(153, 255, 153)
+    C_TEXT = QColor(220, 220, 220)
+    C_NUM_FG = QColor(102, 102, 102)
+    C_CHAPTER_FG = QColor(142, 203, 255)
+
+    def __init__(self, entries, parent=None):
+        super().__init__(parent)
+        self._rows = list(entries)
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 5
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        row = self._rows[index.row()]
+        col = index.column()
+
+        if role == Qt.ItemDataRole.DisplayRole:
+            if col == 0:
+                return row["chapter"]
+            if col == 1:
+                return row["orig_id"]
+            if col == 2:
+                return row["tr_id"]
+            if col == 3:
+                return row["old"]
+            if col == 4:
+                return row["new"]
+            return None
+
+        if role == Qt.ItemDataRole.ToolTipRole:
+            if col == 0:
+                return row.get("chapter_url", "")
+            return None
+
+        if role == Qt.ItemDataRole.BackgroundRole:
+            if col == 3:
+                return self.C_OLD_BG
+            if col == 4:
+                return self.C_NEW_BG
+            return self.C_BG
+
+        if role == Qt.ItemDataRole.ForegroundRole:
+            if col == 0:
+                return self.C_CHAPTER_FG
+            if col in (1, 2):
+                return self.C_NUM_FG
+            if col == 3:
+                return self.C_OLD_FG
+            if col == 4:
+                return self.C_NEW_FG
+            return self.C_TEXT
+
+        if role == Qt.ItemDataRole.TextAlignmentRole:
+            align = Qt.AlignmentFlag.AlignTop
+            if col in (1, 2):
+                align |= Qt.AlignmentFlag.AlignRight
+            else:
+                align |= Qt.AlignmentFlag.AlignLeft
+            return int(align.value)
+
+        return None
+
+    def headerData(self, section, orientation,
+                   role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal \
+                and role == Qt.ItemDataRole.DisplayRole:
+            return self.HEADERS[section]
+        return None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+
+    def cell_text(self, row: int, col: int) -> str:
+        if not (0 <= row < len(self._rows)):
+            return ""
+        r = self._rows[row]
+        return [r["chapter"], r["orig_id"], r["tr_id"],
+                r["old"], r["new"]][col]
+
+
+class ReplacePreviewDialog(QDialog):
+    """Таблица планируемых замен для вкладки «Заменить».
+
+    confirm_mode=False — информационное окно (dry-run).
+    confirm_mode=True  — с кнопками «Применить/Отмена»; на сайт ничего
+                         не уходит до нажатия «Применить».
+    """
+
+    def __init__(self, entries, parent=None, *, confirm_mode: bool = False):
+        super().__init__(parent)
+        self._confirm_mode = confirm_mode
+        self._base_title = (
+            "Подтверждение замен на сайте"
+            if confirm_mode
+            else "Пробный прогон — список замен"
+        )
+        self.setWindowTitle(self._base_title)
+        self.resize(1400, 900)
+        self.setWindowIcon(QtGui.QIcon(":/d/Untitled-12.png"))
+        self.setStyleSheet(
+            "background-color: rgb(34, 35, 36); color: rgb(247, 247, 247);"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        chapters = len({e.get("chapter_url", "") for e in entries})
+        total = len(entries)
+
+        header = QHBoxLayout()
+        header.setSpacing(16)
+        lbl_total = QLabel(f"<b>Замен найдено:</b> {total}")
+        lbl_chapters = QLabel(
+            f"<b>Глав затронуто:</b> {chapters}"
+        )
+        header.addWidget(lbl_total)
+        header.addWidget(lbl_chapters)
+
+        if confirm_mode:
+            hint = QLabel(
+                "<span style='color:#ffdd88'>"
+                "Изменения на сайте НЕ отправлены. "
+                "Нажмите «Применить», чтобы выполнить замену."
+                "</span>"
+            )
+        else:
+            hint = QLabel(
+                "<span style='color:#888'>"
+                "DRY-RUN — на сайт ничего не отправляется."
+                "</span>"
+            )
+        header.addWidget(hint)
+        header.addStretch()
+
+        if self._confirm_mode:
+            cancel_btn = QPushButton("Отмена")
+            cancel_btn.clicked.connect(self.reject)
+            header.addWidget(cancel_btn)
+
+            apply_btn = QPushButton("Применить")
+            apply_btn.setStyleSheet(
+                "QPushButton {"
+                " background-color: rgb(46, 125, 50);"
+                " color: rgb(247, 247, 247);"
+                " padding: 4px 18px;"
+                " border: 1px solid rgb(70, 160, 75);"
+                " border-radius: 3px;"
+                "}"
+                "QPushButton:hover { background-color: rgb(56, 142, 60); }"
+                "QPushButton:pressed { background-color: rgb(36, 105, 40); }"
+            )
+            apply_btn.setDefault(True)
+            apply_btn.setAutoDefault(True)
+            apply_btn.clicked.connect(self.accept)
+            header.addWidget(apply_btn)
+        else:
+            close_btn = QPushButton("Закрыть")
+            close_btn.clicked.connect(self.accept)
+            header.addWidget(close_btn)
+
+        layout.addLayout(header)
+
+        self._model = ReplaceTableModel(entries, self)
+
+        table = QTableView()
+        table.setStyleSheet(
+            "QTableView {"
+            " background-color: rgb(23, 23, 23);"
+            " color: rgb(220, 220, 220);"
+            " gridline-color: rgb(50, 50, 50);"
+            " border: 1px solid rgb(60, 60, 60);"
+            "}"
+            "QTableView::item { padding: 0px 4px; }"
+            "QHeaderView::section {"
+            " background-color: rgb(42, 42, 42);"
+            " color: rgb(220, 220, 220);"
+            " padding: 4px 8px;"
+            " border: none;"
+            " border-bottom: 1px solid rgb(80, 80, 80);"
+            "}"
+        )
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        table.setWordWrap(True)
+        table.setFont(QFont("Consolas", 10))
+        table.setHorizontalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        table.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        table.setModel(self._model)
+
+        hv = table.horizontalHeader()
+        hv.setMinimumSectionSize(40)
+        for col in range(5):
+            hv.setSectionResizeMode(
+                col, QHeaderView.ResizeMode.Interactive
+            )
+        hv.setStretchLastSection(False)
+
+        table.setColumnWidth(0, 220)
+        table.setColumnWidth(1, 70)
+        table.setColumnWidth(2, 70)
+        table.setColumnWidth(3, 380)
+        table.setColumnWidth(4, 380)
+
+        vh = table.verticalHeader()
+        vh.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # потолок: если одна ячейка — на 20 строк текста, не растягиваем
+        # её на весь экран. Полный текст по-прежнему доступен через
+        # двойной клик по ячейке.
+        vh.setMaximumSectionSize(300)
+
+        layout.addWidget(table, 1)
+        self._table = table
+
+        table.doubleClicked.connect(self._on_cell_double_clicked)
+        table.setFocus()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if getattr(self, "_initial_sizing_done", False):
+            return
+        self._initial_sizing_done = True
+        try:
+            total = self._table.viewport().width()
+        except (RuntimeError, AttributeError):
+            return
+        # 0=220 (глава), 1=70, 2=70, плюс запас под скроллбар
+        text_space = max(total - 380, 200)
+        half = text_space // 2
+        self._table.setColumnWidth(3, half)
+        self._table.setColumnWidth(4, half)
+        # после смены ширины колонок высоты надо пересчитать:
+        # с ResizeToContents оно произойдёт автоматически, но
+        # форсируем на случай, если Qt поленится
+        self._table.resizeRowsToContents()
+
+    def keyPressEvent(self, event):
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self._copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _copy_selection(self):
+        try:
+            indexes = self._table.selectedIndexes()
+            if not indexes:
+                return
+
+            rows: dict[int, dict[int, str]] = {}
+            for idx in indexes:
+                text = self._model.cell_text(idx.row(), idx.column())
+                if "\x00" in text:
+                    text = text.replace("\x00", "")
+                rows.setdefault(idx.row(), {})[idx.column()] = text
+
+            lines = []
+            for row in sorted(rows):
+                cols = rows[row]
+                cells = [cols.get(c, "") for c in sorted(cols)]
+                lines.append("\t".join(cells))
+
+            payload = "\n".join(lines)
+            if len(payload) > 5_000_000:
+                payload = payload[:5_000_000] + "\n… (обрезано)"
+
+            QApplication.clipboard().setText(payload)
+            base = self._base_title
+            self.setWindowTitle(f"{base}  ✓ скопировано")
+            QTimer.singleShot(1200, lambda: self.setWindowTitle(base))
+        except Exception as exc:
+            _write_log(f"copy selection error: {exc}")
+
+    def _on_cell_double_clicked(self, index: QModelIndex):
+        if not index.isValid():
+            return
+        text = self._model.cell_text(index.row(), index.column())
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Содержимое ячейки")
+        dlg.resize(900, 400)
+        dlg.setStyleSheet(
+            "background-color: rgb(34, 35, 36);"
+            " color: rgb(247, 247, 247);"
+        )
+        dlg_layout = QVBoxLayout(dlg)
+        dlg_layout.setContentsMargins(10, 10, 10, 10)
+        dlg_layout.setSpacing(8)
+
+        editor = QPlainTextEdit()
+        editor.setPlainText(text)
+        editor.setReadOnly(True)
+        editor.setFont(QFont("Consolas", 11))
+        editor.setStyleSheet(
+            "QPlainTextEdit {"
+            " background-color: rgb(23, 23, 23);"
+            " color: rgb(220, 220, 220);"
+            " border: 1px solid rgb(60, 60, 60);"
+            "}"
+        )
+        dlg_layout.addWidget(editor, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_copy_all = QPushButton("Копировать всё")
+        btn_copy_all.clicked.connect(
+            lambda: QApplication.clipboard().setText(text)
+        )
+        btn_row.addWidget(btn_copy_all)
+        btn_close = QPushButton("Закрыть")
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        dlg_layout.addLayout(btn_row)
+
+        editor.setFocus()
+        editor.selectAll()
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.exec()
+
+
+# --------------------------------------------------------------------------- #
 # TaskThread
 # --------------------------------------------------------------------------- #
 
@@ -545,6 +1543,8 @@ class TaskThread(QThread):
     task_finished = pyqtSignal(str)
     progress_value = pyqtSignal(int)
     progress_text = pyqtSignal(str)
+    request_diff_preview = pyqtSignal(object)
+    request_replace_preview = pyqtSignal(object)
 
     def __init__(self, state: RunState, parent=None):
         super().__init__(parent)
@@ -554,9 +1554,31 @@ class TaskThread(QThread):
         self.client = SiteClient(self.http, state.book_url, csrf_url=csrf_url)
         self._stop = False
         self.http.csrf_refresh_callback = self.client.refetch_csrf
+        # прогресс для вкладки ADD
+        self._op_total = 0
+        self._op_done = 0
 
     def stop(self):
         self._stop = True
+
+    def _can_skip_site_access(self) -> bool:
+        """True, когда dry-run не обращается к сайту — логин не нужен."""
+        if not self.state.dry_run:
+            return False
+        if self.state.tab == Tab.ADD:
+            # f1_data уже загружен пользователем → скачивать нечего
+            return bool(self.state.f1_data)
+        if self.state.tab == Tab.REFRESH:
+            # dry-run REFRESH ничего не делает
+            return True
+        return False
+
+    def _tick_progress(self):
+        self._op_done += 1
+        if self._op_total > 0:
+            self.progress_value.emit(
+                int(100 * self._op_done / self._op_total)
+            )
 
     # --- обёртки над операциями (dry_run) ---
     def _add(self, ordinal: int, text: str):
@@ -572,6 +1594,7 @@ class TaskThread(QThread):
                 return
         self.state.add_count += 1
         self.progress_text.emit(f"add {self.state.add_count}) {ordinal}: {text}")
+        self._tick_progress()
 
     def _swap(self, ordinal: int, text: str):
         if not self.state.dry_run:
@@ -586,6 +1609,7 @@ class TaskThread(QThread):
                 return
         self.state.swap_count += 1
         self.progress_text.emit(f"swap {self.state.swap_count}) {ordinal}: {text}")
+        self._tick_progress()
 
     def _delete(self, ordinal: int, text: str):
         if self.state.dry_run:
@@ -593,6 +1617,7 @@ class TaskThread(QThread):
             self.progress_text.emit(f"delete {ordinal}: {text}")
             if 0 <= ordinal - 1 < len(self.state.f1_data):
                 self.state.f1_data.pop(ordinal - 1)
+            self._tick_progress()
             return
 
         if not self.client.delete_str(ordinal):
@@ -609,28 +1634,38 @@ class TaskThread(QThread):
         if 0 <= ordinal - 1 < len(self.state.f1_data):
             self.state.f1_data.pop(ordinal - 1)
         self.progress_text.emit(f"delete {ordinal}: {text}")
+        self._tick_progress()
 
     def run(self):
         self.task_started.emit(f"Task {self.state.tab.name} START")
         start = time.time()
         try:
-            if self.state.login and self.state.password:
-                if not self.http.login(self.state.login, self.state.password):
-                    self.progress_text.emit(
-                        "Login failed — проверьте логин/пароль. "
-                        "Все книги приватные, без авторизации работать не будет."
-                    )
-                    return
-                self.progress_text.emit("Login OK")
-            else:
-                if not self.state.dry_run:
-                    self.progress_text.emit("Логин и пароль не заданы — нельзя работать с приватной книгой")
-                    return
+            if self._can_skip_site_access():
                 self.progress_text.emit(
-                    "⚠ Логин/пароль не заданы. Для приватной книги скачивание оригинала не сработает."
+                    "Dry-run: сайт не нужен — логин и CSRF пропущены"
                 )
-            self.client.refetch_csrf()
-            # self.progress_text.emit("CSRF token refreshed")
+            else:
+                if self.state.login and self.state.password:
+                    if not self.http.login(self.state.login, self.state.password):
+                        self.progress_text.emit(
+                            "Login failed — проверьте логин/пароль. "
+                            "Все книги приватные, без авторизации работать не будет."
+                        )
+                        return
+                    self.progress_text.emit("Login OK")
+                else:
+                    if not self.state.dry_run:
+                        self.progress_text.emit(
+                            "Логин и пароль не заданы — нельзя работать "
+                            "с приватной книгой"
+                        )
+                        return
+                    self.progress_text.emit(
+                        "⚠ Логин/пароль не заданы. Для приватной книги "
+                        "скачивание оригинала не сработает."
+                    )
+                self.client.refetch_csrf()
+
             self.progress_value.emit(0)
             {
                 Tab.ADD: self._task_add,
@@ -642,18 +1677,20 @@ class TaskThread(QThread):
         except Exception as exc:
             self.progress_text.emit(f"Error: {exc}")
         finally:
+            _flush_log()
             self.task_finished.emit(
-                f"Task {self.state.tab.name} END ({round(time.time() - start)}s)"
+                f"Task {self.state.tab.name} END "
+                f"({round(time.time() - start)}s)"
             )
 
     # ---------------- Tab 0: ADD ----------------
     def _ensure_f1_data(self) -> bool:
-        """Если старый файл не выбран — тянем текущее состояние книги с сайта."""
         if self.state.f1_data:
             return True
         if not self.state.book_url:
             self.progress_text.emit(
-                "Выберите старый файл или укажите URL книги, чтобы скачать её текущее состояние"
+                "Выберите старый файл или укажите URL книги, "
+                "чтобы скачать её текущее состояние"
             )
             return False
 
@@ -661,11 +1698,19 @@ class TaskThread(QThread):
         saved = self.state.only_untranslated
         self.state.only_untranslated = False
         try:
-            self.state.f1_data = self._download_originals()
+            lines, failed = self._download_originals()
         finally:
             self.state.only_untranslated = saved
 
-        if not self.state.f1_data:
+        if failed > 0:
+            self.progress_text.emit(
+                f"⚠ {failed} страниц(ы) не скачались — прерываю.\n"
+                f"Иначе сравнение будет некорректным "
+                f"и на сайте пропадут строки.\n"
+                f"Проверьте соединение и повторите."
+            )
+            return False
+        if not lines:
             self.progress_text.emit(
                 "Не удалось скачать оригинал с сайта. Проверьте:\n"
                 "  • URL книги верный и книга существует;\n"
@@ -673,11 +1718,18 @@ class TaskThread(QThread):
                 "  • вы имеете доступ к этой книге на notabenoid.org"
             )
             return False
-        self.progress_text.emit(f"Скачано {len(self.state.f1_data)} строк")
+        self.state.f1_data = lines
+        self.progress_text.emit(f"Скачано {len(lines)} строк")
         return True
 
     def _task_add(self):
         if not self._ensure_f1_data():
+            return
+
+        if self._stop:
+            self.progress_text.emit(
+                "Отменено до сравнения — сайт не тронут."
+            )
             return
 
         sm = difflib.SequenceMatcher(
@@ -688,27 +1740,74 @@ class TaskThread(QThread):
             self.progress_text.emit("Files are identical")
             return
 
-        if self.state.dry_run:
-            self.progress_text.emit("--- DRY-RUN preview (# = позиция в новом файле) ---")
+        self._op_total = sum(
+            max(i2 - i1, j2 - j1)
+            for tag, i1, i2, j1, j2 in opcodes
+            if tag != "equal"
+        )
+        self._op_done = 0
+        self.progress_value.emit(0)
 
-        added = self._apply_diff()
+        payload = {
+            "old": list(self.state.f1_data),
+            "new": list(self.state.f2_data),
+            "opcodes": list(opcodes),
+        }
+
+        if self._stop:
+            return
+
+        if self.state.dry_run:
+            # Dry-run ничего не меняет — превью информативное, не блокирует.
+            self.progress_text.emit(
+                "--- DRY-RUN preview (# = позиция в новом файле) ---"
+            )
+            self.request_diff_preview.emit(payload)
+        else:
+            # Боевой режим: показываем таблицу и ЖДЁМ решения пользователя.
+            self.progress_text.emit(
+                "Ожидание подтверждения — проверьте таблицу изменений…"
+            )
+            evt = threading.Event()
+            holder = {"confirmed": False}
+            payload["event"] = evt
+            payload["result"] = holder
+            self.request_diff_preview.emit(payload)
+
+            while not evt.wait(0.1):
+                if self._stop:
+                    self.progress_text.emit(
+                        "Отменено до начала изменений — сайт не тронут."
+                    )
+                    return
+
+            if not holder["confirmed"]:
+                self.progress_text.emit(
+                    "Отменено пользователем — сайт не тронут."
+                )
+                return
+            self.progress_text.emit(
+                "Подтверждено — начинаю изменения на сайте."
+            )
+
+        inserted = self._apply_diff()
         if self.state.dry_run:
             self.state.f1_data = []
+            self.progress_value.emit(100)
             return
-        if added:
-            if self.state.comment.strip():
-                for ordinal in added:
-                    if self._stop:
-                        break
-                    self.client.add_comment(ordinal, self.state.comment)
+        if inserted and self.state.comment.strip():
+            for ordinal in inserted:
+                if self._stop:
+                    break
+                self.client.add_comment(ordinal, self.state.comment)
 
         self.progress_text.emit(
             f"Add: {self.state.add_count}, "
             f"Swap: {self.state.swap_count}, "
             f"Delete: {self.state.del_count}"
         )
+        self.progress_value.emit(100)
 
-        # Сбрасываем скачанный f1_data — следующий запуск гарантированно перекачает
         self.state.f1_data = []
 
     def _apply_diff(self) -> list[int]:
@@ -722,7 +1821,38 @@ class TaskThread(QThread):
             return []
 
         if to_delete and not self.state.dry_run:
-            self.client.refresh_ids_from(min(to_delete))
+            fail = self.client.refresh_ids_from(
+                min(to_delete),
+                log=lambda m: self.progress_text.emit(m),
+                should_stop=lambda: self._stop,
+            )
+            if fail > 0:
+                self.progress_text.emit(
+                    f"\n⛔⛔⛔ ВНИМАНИЕ ⛔⛔⛔\n"
+                    f"Refresh ID: {fail} строк не обновилось.\n"
+                    f"\n"
+                    f"«Добавить оригинал» прерван, чтобы не испортить "
+                    f"нумерацию.\n"
+                    f"\n"
+                    f"ВАЖНО: нумерация на сайте может быть ЧАСТИЧНО "
+                    f"обновлена — часть строк получила новый ord, часть нет.\n"
+                    f"\n"
+                    f"НЕ ЗАПУСКАЙТЕ другие операции (Добавить оригинал, "
+                    f"Заменить, Добавить перевод), пока не выровняете ID:\n"
+                    f"  1. Откройте вкладку «Обновить ID» (вкладка 2).\n"
+                    f"  2. Номер строки: 1.\n"
+                    f"  3. Нажмите «Начать» и дождитесь «Все N строк "
+                    f"обновлены».\n"
+                    f"  4. Если снова «⚠ Некоторые строки не обновились» — "
+                    f"повторяйте, пока не выйдет полностью.\n"
+                    f"\n"
+                    f"Только после этого можно повторять «Добавить оригинал» "
+                    f"с очищенным полем «Файл оригинала с сайта»."
+                )
+                self._stop = True
+                return []
+            if self._stop:
+                return []
 
         return self._plan_additions()
 
@@ -740,18 +1870,19 @@ class TaskThread(QThread):
                     to_delete[i1 + 1 + k] = self.state.f1_data[i1 + k]
         return to_delete
 
-    def _optimal_pairs(self, old_lines: list[str], new_lines: list[str]) -> dict[int, int]:
-        """Монотонное назначение ВСЕХ old на подмножество new (максимум similarity).
-
-        Возвращает {new_idx: old_idx}. Требует len(old) <= len(new).
-        Гарантирует монотонность: если i1 < i2 — то new_idx(i1) < new_idx(i2).
-        """
+    def _optimal_pairs(
+            self, old_lines: list[str], new_lines: list[str],
+    ) -> dict[int, int]:
+        """Монотонное назначение ВСЕХ old на подмножество new
+        (максимум similarity)."""
         n, m = len(old_lines), len(new_lines)
         if n == 0 or m == 0 or n > m:
             return {}
 
         sim = [
-            [difflib.SequenceMatcher(None, old_lines[i], new_lines[j], autojunk=False).ratio()
+            [difflib.SequenceMatcher(
+                None, old_lines[i], new_lines[j], autojunk=False
+            ).ratio()
              for j in range(m)]
             for i in range(n)
         ]
@@ -760,20 +1891,17 @@ class TaskThread(QThread):
         dp = [[NEG] * (m + 1) for _ in range(n + 1)]
         choice = [[''] * (m + 1) for _ in range(n + 1)]
 
-        # 0 old matched = 0 score для любого j
         for j in range(m + 1):
             dp[0][j] = 0.0
             choice[0][j] = 'base'
 
         for i in range(1, n + 1):
             for j in range(1, m + 1):
-                # match old[i-1] с new[j-1]
                 if dp[i - 1][j - 1] > NEG:
                     cand = dp[i - 1][j - 1] + sim[i - 1][j - 1]
                     if cand > dp[i][j]:
                         dp[i][j] = cand
                         choice[i][j] = 'match'
-                # пропустить new[j-1] (skip_old НЕ разрешён — все old обязаны matched)
                 if dp[i][j - 1] > dp[i][j]:
                     dp[i][j] = dp[i][j - 1]
                     choice[i][j] = 'skip_new'
@@ -796,11 +1924,12 @@ class TaskThread(QThread):
         return pairs
 
     def _plan_additions(self) -> list[int]:
+        """Возвращает ord всех ИЗМЕНЁННЫХ строк (insert + swap) — для комментария."""
         sm = difflib.SequenceMatcher(
             None, self.state.f1_data, self.state.f2_data, autojunk=False,
         )
-        added: list[int] = []
-        shift = 0  # сколько строк уже вставлено до текущего opcode
+        touched: list[int] = []
+        shift = 0
 
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
             if tag == "equal":
@@ -810,9 +1939,9 @@ class TaskThread(QThread):
                 for k in range(j2 - j1):
                     ordinal = i1 + 1 + shift + k
                     if self._stop:
-                        return added
+                        return touched
                     self._add(ordinal, self.state.f2_data[j1 + k])
-                    added.append(ordinal)
+                    touched.append(ordinal)
                 shift += (j2 - j1)
 
             elif tag == "replace":
@@ -823,44 +1952,41 @@ class TaskThread(QThread):
                     for k in range(new_n):
                         ordinal = i1 + 1 + shift + k
                         if self._stop:
-                            return added
+                            return touched
                         self._swap(ordinal, self.state.f2_data[j1 + k])
-                        added.append(ordinal)
+                        touched.append(ordinal)
 
                 elif old_n < new_n:
                     old_lines = self.state.f1_data[i1:i2]
                     new_lines = self.state.f2_data[j1:j2]
                     pairs = self._optimal_pairs(old_lines, new_lines)
 
-                    # 1. swap для пар, где текст реально изменился
                     for ni in sorted(pairs.keys(), key=lambda n: pairs[n]):
                         oi = pairs[ni]
                         if old_lines[oi] == new_lines[ni]:
-                            continue  # текст совпадает — POST не нужен
+                            continue
                         ordinal = i1 + 1 + oi + shift
                         if self._stop:
-                            return added
+                            return touched
                         self._swap(ordinal, new_lines[ni])
-                        added.append(ordinal)
+                        touched.append(ordinal)
 
-                    # 2. insert для новых строк без пары
-                    cur = i1 + shift  # 0-based позиция в f1_data
+                    cur = i1 + shift
                     for ni in range(new_n):
                         if ni in pairs:
-                            cur += 1  # matched — уже на своём месте
+                            cur += 1
                         else:
-                            ordinal = cur + 1  # 1-based
+                            ordinal = cur + 1
                             if self._stop:
-                                return added
+                                return touched
                             self._add(ordinal, new_lines[ni])
-                            added.append(ordinal)
+                            touched.append(ordinal)
                             cur += 1
 
                     shift += (new_n - old_n)
 
-                # old_n > new_n — уже удалено в фазе 1
+        return touched
 
-        return added
     # ---------------- Tab 1: REFRESH ----------------
     def _task_refresh(self):
         if self.state.dry_run:
@@ -869,31 +1995,44 @@ class TaskThread(QThread):
         self.client.refresh_ids_from(
             self.state.start_line,
             log=lambda msg: self.progress_text.emit(msg),
+            should_stop=lambda: self._stop,
         )
         self.progress_value.emit(100)
 
     # ---------------- Tab 2: DOWNLOAD ----------------
     def _task_download(self):
         if self.state.download_kind == DownloadKind.ORIGINAL:
-            lines = self._download_originals()
+            lines, failed = self._download_originals()
             default = "binary_orig_from_site.txt"
         else:
-            lines = self._download_translations()
+            lines, failed = self._download_translations()
             default = "binary_trans_from_site.txt"
 
+        if not self.state.save_path:
+            self.progress_text.emit(
+                f"Путь не указан — сохраняю в {os.path.abspath(default)}"
+            )
         path = self.state.save_path or default
         write_lines(path, lines, self.state.json_template)
         self.progress_text.emit(f"Saved {len(lines)} lines -> {path}")
+        if failed:
+            self.progress_text.emit(
+                f"⚠ {failed} страниц(ы) не скачались — файл неполный"
+            )
 
-    def _download_originals(self) -> list[str]:
-        last = self.client.last_page(not_translated=self.state.only_untranslated)
+    def _download_originals(self) -> tuple[list[str], int]:
+        last = self.client.last_page(
+            not_translated=self.state.only_untranslated
+        )
         result: list[str] = []
         failed = 0
         for page in range(1, last + 1):
             if self._stop:
                 break
             soup = self.http.soup(
-                self.client.page_url(page, not_translated=self.state.only_untranslated)
+                self.client.page_url(
+                    page, not_translated=self.state.only_untranslated
+                )
             )
             if not soup:
                 failed += 1
@@ -903,27 +2042,34 @@ class TaskThread(QThread):
             if not tbody:
                 continue
             for row in tbody[0].find_all("tr"):
+                rid_raw = row.get("id")
+                if not rid_raw or not str(rid_raw).startswith("o"):
+                    continue
                 p = row.find("p", class_="text")
                 if p:
-                    result.append(p.get_text(separator="\n").rstrip())
+                    result.append(_extract_ptext(p).rstrip())
             self.progress_value.emit(int(100 * page / last))
-        if failed:
-            self.progress_text.emit(f"⚠ {failed} page(s) failed to download")
-        return result
+        return result, failed
 
-    def _download_translations(self) -> list[str]:
+    def _download_translations(self) -> tuple[list[str], int]:
         last = self.client.last_page()
         result: list[str] = []
+        failed = 0
         for page in range(1, last + 1):
             if self._stop:
                 break
             soup = self.http.soup(self.client.page_url(page))
             if not soup:
+                failed += 1
+                self.progress_text.emit(f"  page {page}/{last}: not fetched")
                 continue
             tbody = soup.find_all("tbody")
             if not tbody:
                 continue
             for row in tbody[0].find_all("tr"):
+                rid_raw = row.get("id")
+                if not rid_raw or not str(rid_raw).startswith("o"):
+                    continue
                 t_cell = row.find(class_="t")
                 if t_cell is None:
                     continue
@@ -933,19 +2079,19 @@ class TaskThread(QThread):
                     if best:
                         p = best.find("p", class_="text")
                         if p:
-                            result.append(p.get_text(separator="\n").rstrip())
+                            result.append(_extract_ptext(p).rstrip())
                             continue
                 if texts:
-                    result.append(texts[0].get_text(separator="\n").rstrip())
+                    result.append(_extract_ptext(texts[0]).rstrip())
                 elif self.state.insert_from_original:
                     o_cell = row.find(class_="o")
                     p = o_cell.find("p", class_="text") if o_cell else None
                     if p:
-                        result.append(p.get_text(separator="\n").rstrip())
+                        result.append(_extract_ptext(p).rstrip())
                 else:
                     result.append("")
             self.progress_value.emit(int(100 * page / last))
-        return result
+        return result, failed
 
     # ---------------- Tab 4: ADD TRANS ----------------
     def _task_add_trans(self):
@@ -958,7 +2104,7 @@ class TaskThread(QThread):
 
         try:
             texts = read_lines(self.state.translation_file)
-        except Exception as exc:
+        except (OSError, ValueError) as exc:
             self.progress_text.emit(f"File error: {exc}")
             return
 
@@ -983,7 +2129,8 @@ class TaskThread(QThread):
                 self.progress_text.emit(
                     f"⚠ Страница {page}/{last}: {len(ids)} строк "
                     f"(ожидалось {PAGE_SIZE}) — прерываю.\n"
-                    f"Перевод НЕ загружен — иначе rid/text рассинхронизируются."
+                    f"Перевод НЕ загружен — иначе rid/text "
+                    f"рассинхронизируются."
                 )
                 return
             all_ids.extend(ids)
@@ -997,8 +2144,8 @@ class TaskThread(QThread):
         if self.state.dry_run:
             non_empty = sum(1 for t in texts if t)
             self.progress_text.emit(
-                f"--- DRY-RUN: применилось бы {non_empty}/{len(texts)} переводов "
-                f"({len(texts) - non_empty} пустых пропущено) ---"
+                f"--- DRY-RUN: применилось бы {non_empty}/{len(texts)} "
+                f"переводов ({len(texts) - non_empty} пустых пропущено) ---"
             )
             return
 
@@ -1038,19 +2185,22 @@ class TaskThread(QThread):
 
         self.progress_text.emit(f"Целей: {len(urls)} глава/глав")
         if self.state.dry_run:
-            self.progress_text.emit("--- DRY-RUN: изменения НЕ отправляются ---")
+            self.progress_text.emit(
+                "--- DRY-RUN: изменения НЕ отправляются ---"
+            )
 
-        total_ok = total_fail = total_found = 0
+        filter_text = (
+            self.state.search_text
+            if len(self.state.search_text) >= 2
+            else None
+        )
+
+        # ---------- Фаза 1: собрать все замены ----------
+        planned: list[dict] = []
         for idx, chapter_url in enumerate(urls, start=1):
             if self._stop:
-                break
+                return
             self.progress_text.emit(f"\n[{idx}/{len(urls)}] {chapter_url}")
-
-            filter_text = (
-                self.state.search_text
-                if len(self.state.search_text) >= 2
-                else None
-            )
 
             chapter_title, entries = self._scan_chapter_translations(
                 chapter_url, search_text=filter_text,
@@ -1072,45 +2222,115 @@ class TaskThread(QThread):
                 self.progress_text.emit("  (нет переводов)")
                 continue
 
+            short = chapter_url.rsplit("/", 2)
+            chapter_label = (
+                chapter_title
+                or "/".join(short[-2:]) if len(short) >= 2 else chapter_url
+            )
+
             for orig_id, tr_id, text in entries:
                 if self._stop:
-                    break
+                    return
                 new_text = self._replace_in_text(text)
                 if new_text is None or new_text == text:
                     continue
-                total_found += 1
-                if self.state.dry_run:
-                    self.progress_text.emit(
-                        f"  would replace {orig_id}/{tr_id}: "
-                        f"{text[:60]!r} => {new_text[:60]!r}"
-                    )
-                    continue
-                if self.client.replace_translation(
-                        chapter_url, orig_id, tr_id, new_text,
-                ):
-                    total_ok += 1
-                    self.progress_text.emit(f"  ✓ {orig_id}/{tr_id}")
-                else:
-                    total_fail += 1
-                    self.progress_text.emit(f"  ✗ {orig_id}/{tr_id} failed")
+                planned.append({
+                    "chapter": chapter_label,
+                    "chapter_url": chapter_url,
+                    "orig_id": orig_id,
+                    "tr_id": tr_id,
+                    "old": text,
+                    "new": new_text,
+                })
+
+        if not planned:
+            self.progress_text.emit(
+                "\nСовпадений не найдено — нечего применять."
+            )
+            return
+
+        self.progress_text.emit(f"\nНайдено замен: {len(planned)}")
+
+        if self._stop:
+            return
+
+        # ---------- Фаза 2: preview + подтверждение ----------
+        payload = {"entries": list(planned)}
 
         if self.state.dry_run:
-            self.progress_text.emit(f"\nDRY-RUN: нашлось {total_found} совпадений")
-        else:
             self.progress_text.emit(
-                f"\nDone: replaced={total_ok}, failed={total_fail}, "
-                f"matched={total_found}"
+                "--- DRY-RUN: см. таблицу замен ---"
             )
+            self.request_replace_preview.emit(payload)
+            self.progress_text.emit(
+                f"\nDRY-RUN: нашлось {len(planned)} совпадений — "
+                f"на сайт ничего не отправлено."
+            )
+            return
+
+        self.progress_text.emit(
+            "Ожидание подтверждения — проверьте таблицу замен…"
+        )
+        evt = threading.Event()
+        holder = {"confirmed": False}
+        payload["event"] = evt
+        payload["result"] = holder
+        self.request_replace_preview.emit(payload)
+
+        while not evt.wait(0.1):
+            if self._stop:
+                self.progress_text.emit(
+                    "Отменено до начала изменений — сайт не тронут."
+                )
+                return
+
+        if not holder["confirmed"]:
+            self.progress_text.emit(
+                "Отменено пользователем — сайт не тронут."
+            )
+            return
+        self.progress_text.emit(
+            "Подтверждено — начинаю замену на сайте."
+        )
+
+        # ---------- Фаза 3: применить ----------
+        total = len(planned)
+        total_ok = total_fail = 0
+        for i, item in enumerate(planned, start=1):
+            if self._stop:
+                break
+            if i % 20 == 0 or i == total:
+                self.progress_text.emit(f"{i}/{total}")
+            if self.client.replace_translation(
+                item["chapter_url"], item["orig_id"], item["tr_id"],
+                item["new"],
+            ):
+                total_ok += 1
+                self.progress_text.emit(
+                    f"  ✓ {item['orig_id']}/{item['tr_id']}"
+                )
+            else:
+                total_fail += 1
+                self.progress_text.emit(
+                    f"  ✗ {item['orig_id']}/{item['tr_id']} failed"
+                )
+
+        self.progress_text.emit(
+            f"\nDone: replaced={total_ok}, failed={total_fail}, "
+            f"matched={total}"
+        )
 
     def _replace_in_text(self, text: str) -> Optional[str]:
         if self.state.replace_entire:
-            return self.state.replacement if text == self.state.search_text else None
+            return (self.state.replacement
+                    if text == self.state.search_text else None)
         if self.state.search_text not in text:
             return None
         return text.replace(self.state.search_text, self.state.replacement)
 
     def _resolve_targets(self, url: str) -> list[str]:
-        """Понимает /book/NNN (вся книга) и /book/NNN/MMM (одна глава)."""
+        # URL может прийти с ?from=feed или #comment из адресной строки
+        url = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
         m = re.match(r"^(https?://[^/]+)/book/(\d+)(?:/(\d+))?/?$", url)
         if not m:
             self.progress_text.emit(
@@ -1130,7 +2350,6 @@ class TaskThread(QThread):
         return urls
 
     def _chapter_urls(self, host: str, book_id: str) -> list[str]:
-        """Собирает URL всех глав книги со страницы оглавления."""
         soup = self.http.soup(f"{host}/book/{book_id}")
         if not soup:
             return []
@@ -1138,7 +2357,6 @@ class TaskThread(QThread):
         urls: list[str] = []
         seen: set[str] = set()
 
-        # Основной путь — <tr data-id> в таблице глав (стабильнее, чем href)
         table = soup.find("table", id="chapters")
         if table is not None:
             tbody = table.find("tbody")
@@ -1152,29 +2370,29 @@ class TaskThread(QThread):
                     seen.add(chapter_id)
                     urls.append(f"{host}/book/{book_id}/{chapter_id}")
 
-        # Fallback — по href, если таблицы нет
         if not urls:
+            # Fallback: если таблицы #chapters нет — ищем <a> по href.
+            # Принимаем и относительные, и абсолютные URL, и с трейлингом.
+            pattern = re.compile(
+                rf"^(?:https?://[^/]+)?/book/{book_id}/(\d+)/?$"
+            )
             for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if re.match(rf"^/book/{book_id}/\d+$", href):
-                    if href in seen:
-                        continue
-                    seen.add(href)
-                    urls.append(f"{host}{href}")
+                m = pattern.match(a["href"])
+                if not m:
+                    continue
+                chapter_id = m.group(1)
+                if chapter_id in seen:
+                    continue
+                seen.add(chapter_id)
+                urls.append(f"{host}/book/{book_id}/{chapter_id}")
         return urls
 
     def _scan_chapter_translations(
             self, chapter_url: str,
             search_text: Optional[str] = None,
     ) -> tuple[str, list[tuple[str, str, str]]]:
-        """Все переводы одной главы.
-
-        Если передан search_text — используем серверный фильтр notabenoid
-        ?show=6&tt=SEARCH, который вернёт только страницы, где в переводе
-        встречается подстрока. Это в 10–100 раз быстрее.
-        """
         if search_text:
-            base = f"{chapter_url}?show=6&tt={quote(search_text)}"
+            base = f"{chapter_url}?show=6&tt={quote(search_text, safe='')}"
             page_sep = "&"
         else:
             base = chapter_url
@@ -1233,9 +2451,11 @@ class TaskThread(QThread):
                     if p:
                         result.append(
                             (orig_id, div_id[1:],
-                             p.get_text(separator="\n").rstrip())
+                             _extract_ptext(p).rstrip())
                         )
         return title, result
+
+
 # --------------------------------------------------------------------------- #
 # MainWindow
 # --------------------------------------------------------------------------- #
@@ -1271,6 +2491,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.thread: Optional[TaskThread] = None
         self.running_tab: Optional[Tab] = None
         self._dry_run_saved = False
+        self._diff_preview_dlg: Optional[DiffPreviewDialog] = None
+        self._replace_preview_dlg: Optional[ReplacePreviewDialog] = None
 
         self._init_fonts()
         self._init_state()
@@ -1355,8 +2577,12 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
     def _init_state(self):
         self.login.setPlaceholderText("login")
         self.password.setPlaceholderText("password")
-        self.urlBook.setPlaceholderText("https://notabenoid.org/book/12345/6789")
-        self.fileNameOld.setPlaceholderText("Пусто = скачать текущий оригинал с сайта")
+        self.urlBook.setPlaceholderText(
+            "https://notabenoid.org/book/12345/6789"
+        )
+        self.fileNameOld.setPlaceholderText(
+            "Пусто = скачать текущий оригинал с сайта"
+        )
         self.login.setText(self.config.login)
         self.password.setText(self.config.password)
         self.urlBook.setText(self.config.book_url)
@@ -1371,8 +2597,6 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         if replace_tab is not None:
             replace_tab.setEnabled(True)
         self.btnStartReplace.setEnabled(True)
-        # Отдельная галка dry-run на вкладке «Заменить».
-        # Состояние синхронизируется с self.logBox (см. _connect).
         self.replaceDryCheck = QtWidgets.QCheckBox(
             "Пробный прогон — на сайт ничего не отправляется"
         )
@@ -1380,7 +2604,6 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         if replace_tab is not None:
             layout = replace_tab.layout()
             if layout is not None:
-                # рядом с кнопкой «Начать» (11, 1), занимаем (11, 2..4)
                 layout.addWidget(self.replaceDryCheck, 11, 2, 1, 3)
         self._update_nt_state()
         self._on_tab(self.tabWidget.currentIndex())
@@ -1392,84 +2615,123 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             "style=\"font-family:'JetBrains Mono',monospace; color:#ffffff;\">"
 
             "<p><b>=== Общее ===</b></p>"
-            "<p>Все книги на notabenoid <b>приватные</b> — без логина и пароля программа не работает, даже в dry-run. "
-            "Введите логин/пароль и URL книги сверху. Галки «Сохранить логин и пароль» / «Сохранить Url» "
+            "<p>Все книги на notabenoid <b>приватные</b> — без логина и пароля "
+            "программа не работает, даже в dry-run. "
+            "Введите логин/пароль и URL книги сверху. "
+            "Галки «Сохранить логин и пароль» / «Сохранить Url» "
             "хранят данные в папке lib/ между запусками.</p>"
 
-            "<p>Галка <b>«Сравнить файлы без замены»</b> (вкладка «Добавить оригинал») и галка "
-            "<b>«Пробный прогон»</b> (вкладка «Заменить») — это одно и то же состояние: включая одну, включаете обе. "
-            "В dry-run POST-запросы на изменение не отправляются, только читаются страницы.</p>"
+            "<p>Галка <b>«Сравнить файлы без замены»</b> (вкладка "
+            "«Добавить оригинал») и галка <b>«Пробный прогон»</b> "
+            "(вкладка «Заменить») — это одно и то же состояние: "
+            "включая одну, включаете обе. "
+            "В dry-run POST-запросы на изменение не отправляются, "
+            "только читаются страницы.</p>"
 
             "<p><b>=== Добавить оригинал ===</b></p>"
             "<p>1. Выберите «Новый файл оригинала» — это новое состояние книги.<br/>"
-            "2. «Файл оригинала с сайта» можно не указывать — программа сама скачает текущее состояние с сайта и сравнит.<br/>"
-            "3. Комментарий (необязательно) — добавится к новым строкам.<br/>"
-            "4. Нажмите «Начать». В dry-run покажет план, без dry-run применит на сайте.</p>"
+            "2. «Файл оригинала с сайта» можно не указывать — программа "
+            "сама скачает текущее состояние с сайта и сравнит.<br/>"
+            "3. Комментарий (необязательно) — добавится к новым и заменённым строкам.<br/>"
+            "4. Нажмите «Начать». Всегда открывается окно side-by-side diff:<br/>"
+            "   • в dry-run — информационное, изменения не отправляются;<br/>"
+            "   • без dry-run — с кнопками «Применить» / «Отмена»; на сайт "
+            "ничего не уходит, пока вы не нажмёте «Применить».</p>"
 
             "<p><b>Как работает сравнение:</b><br/>"
             "• Совпавшие строки не трогаются.<br/>"
-            "• Удалённые — удаляются с конца (чтобы номера не съезжали), затем автоматически Refresh ID.<br/>"
+            "• Удалённые — удаляются с конца (чтобы номера не съезжали), "
+            "затем автоматически Refresh ID.<br/>"
             "• Вставленные — добавляются на нужные позиции.<br/>"
-            "• Изменённые 1→1 — заменяются (текст обновляется, перевод сохраняется).<br/>"
-            "• Блоки N→M — программа сама находит наиболее похожие пары, чтобы сохранить привязанные переводы.</p>"
+            "• Изменённые 1→1 — заменяются (текст обновляется, "
+            "перевод сохраняется).<br/>"
+            "• Блоки N→M — программа сама находит наиболее похожие пары, "
+            "чтобы сохранить привязанные переводы.</p>"
 
-            "<p>После успешного прогона кэш старого файла сбрасывается — следующий запуск перекачает свежее состояние "
-            "с сайта. Очищать поле «Файл оригинала с сайта» вручную не нужно.</p>"
+            "<p>После успешного прогона кэш старого файла сбрасывается — "
+            "следующий запуск перекачает свежее состояние с сайта. "
+            "Очищать поле «Файл оригинала с сайта» вручную не нужно.</p>"
 
-            "<p><b>Если задача упала</b> (сеть, протух CSRF) — на сайте состояние может быть частично изменено. "
-            "Очистите «Файл оригинала с сайта» и перезапустите — программа перекачает актуальное состояние.</p>"
+            "<p><b>Если задача упала</b> (сеть, протух CSRF) — на сайте "
+            "состояние может быть частично изменено. "
+            "Очистите «Файл оригинала с сайта» и перезапустите — "
+            "программа перекачает актуальное состояние.</p>"
 
             "<p><b>=== Обновить ID ===</b></p>"
-            "<p>Убирает дыры в нумерации строк (обычно после удалений). Укажите номер строки, с которой начать — обычно 1. "
+            "<p>Убирает дыры в нумерации строк (обычно после удалений). "
+            "Укажите номер строки, с которой начать — обычно 1. "
             "В dry-run ничего не делает.</p>"
-            "<p style=\"color:#ff6b6b\"><b>⚠ ВАЖНО: после обновления проверьте ID на сайте!</b><br/>"
+            "<p style=\"color:#ff6b6b\"><b>⚠ ВАЖНО: после обновления "
+            "проверьте ID на сайте!</b><br/>"
             "1. Откройте книгу на notabenoid.org в браузере.<br/>"
-            "2. Нумерация строк должна идти <b>#1, #2, #3…</b> подряд — без пропусков и дублей.<br/>"
+            "2. Нумерация строк должна идти <b>#1, #2, #3…</b> подряд — "
+            "без пропусков и дублей.<br/>"
             "3. В логе программы последняя строка — «Все N строк обновлены». "
-            "Если увидели «⚠ Некоторые строки не обновились» — нажмите «Обновить ID» ещё раз.<br/>"
-            "4. Порядковые номера (ord) — это основа всех операций. Если они сбились, "
-            "добавление и замена будут ориентироваться не на те строки. "
-            "Не запускайте «Добавить оригинал» или «Заменить», пока ID не выровнены.</p>"
+            "Если увидели «⚠ Некоторые строки не обновились» — "
+            "нажмите «Обновить ID» ещё раз.<br/>"
+            "4. Порядковые номера (ord) — это основа всех операций. "
+            "Если они сбились, добавление и замена будут ориентироваться "
+            "не на те строки. Не запускайте «Добавить оригинал» или "
+            "«Заменить», пока ID не выровнены.</p>"
 
             "<p><b>=== Скачать текст ===</b></p>"
             "<p>Сохраняет оригинал или перевод книги в файл.<br/>"
             "• .txt — по строкам, каждая строка файла = фрагмент сайта.<br/>"
             "• .json — можно указать шаблон, структура сохранится.<br/>"
-            "• «Непереведённое» — фильтр: только строки без перевода (работает только для «Оригинал»).<br/>"
-            "• «Заменять пустые строки оригиналом» — если перевода нет, подставить текст оригинала.</p>"
+            "• «Непереведённое» — фильтр: только строки без перевода "
+            "(работает только для «Оригинал»).<br/>"
+            "• «Заменять пустые строки оригиналом» — если перевода нет, "
+            "подставить текст оригинала.</p>"
 
-            "<p>При скачивании перевода: если у фрагмента несколько вариантов, берётся <b>лучший</b> "
-            "(class=«best»). Если лучшего нет — первый по порядку.</p>"
+            "<p>При скачивании перевода: если у фрагмента несколько вариантов, "
+            "берётся <b>лучший</b> (class=«best»). Если лучшего нет — "
+            "первый по порядку.</p>"
 
             "<p><b>=== Заменить ===</b></p>"
-            "<p>Замена перевода. Укажите URL <b>главы</b> (https://notabenoid.org/book/NNN/MMM) — "
-            "заменит только в ней, или URL <b>книги</b> (https://notabenoid.org/book/NNN) — "
+            "<p>Замена перевода. Укажите URL <b>главы</b> "
+            "(https://notabenoid.org/book/NNN/MMM) — заменит только в ней, "
+            "или URL <b>книги</b> (https://notabenoid.org/book/NNN) — "
             "обойдёт все главы книги.<br/>"
-            "• «Только целые строки» — заменять, только если перевод полностью совпадает с искомым текстом.<br/>"
-            "• Без галки — заменять вхождения подстроки внутри более длинных переводов (все вхождения).<br/>"
-            "• <b>Поиск регистрозависим:</b> «Hello» и «hello» — разные строки.<br/>"
-            "• <b>Ищется по тексту перевода,</b> а не по CSS-классу. Если у div «class=«best»», "
-            "но текст «defddd», программа его не найдёт при поиске «best».<br/>"
-            "• Фильтр сервера `?show=6&tt=` применяется автоматически для запросов длиной 2+ символов — "
-            "это в 100+ раз быстрее на больших книгах (скачиваются только страницы с совпадениями).<br/>"
-            "• В dry-run в логе будет список всех планируемых замен без отправки на сайт.</p>"
+            "• «Только целые строки» — заменять, только если перевод "
+            "полностью совпадает с искомым текстом.<br/>"
+            "• Без галки — заменять вхождения подстроки внутри более "
+            "длинных переводов (все вхождения).<br/>"
+            "• <b>Поиск регистрозависим:</b> «Hello» и «hello» — "
+            "разные строки.<br/>"
+            "• <b>Ищется по тексту перевода,</b> а не по CSS-классу. "
+            "Если у div «class=«best»», но текст «defddd», программа его "
+            "не найдёт при поиске «best».<br/>"
+            "• Фильтр сервера `?show=6&tt=` применяется автоматически "
+            "для запросов длиной 2+ символов — это в 100+ раз быстрее "
+            "на больших книгах (скачиваются только страницы с совпадениями).<br/>"
+            "• В dry-run в логе будет список всех планируемых замен "
+            "без отправки на сайт.</p>"
 
             "<p><b>=== Добавить перевод ===</b></p>"
-            "<p>Загрузка перевода из файла. Количество строк в файле должно <b>точно</b> совпадать "
-            "с числом фрагментов на сайте (с галкой «Непереведённое» — только с числом непереведённых). "
-            "При несовпадении появится «Length mismatch». Пустые строки файла пропускаются.</p>"
+            "<p>Загрузка перевода из файла. Количество строк в файле "
+            "должно <b>точно</b> совпадать с числом фрагментов на сайте "
+            "(с галкой «Непереведённое» — только с числом непереведённых). "
+            "При несовпадении появится «Length mismatch». "
+            "Пустые строки файла пропускаются.</p>"
 
             "<p><b>=== Форматы файлов ===</b></p>"
-            "<p>Файлы должны быть в кодировке <b>UTF-8</b>. Сохраняйте в блокноте через «Сохранить как → UTF-8».<br/>"
-            "• .txt — читается построчно. Каждый перенос = отдельная строка. Пустые строки в середине файла сохраняются.<br/>"
-            "• .json — плоский список строк: [«строка 1», «строка 2», ...]. Перенос внутри строки пишется как <b>\\n</b> "
+            "<p>Файлы должны быть в кодировке <b>UTF-8</b>. "
+            "Сохраняйте в блокноте через «Сохранить как → UTF-8».<br/>"
+            "• .txt — читается построчно. Каждый перенос = отдельная строка. "
+            "Пустые строки в середине файла сохраняются.<br/>"
+            "• .json — плоский список строк: [«строка 1», «строка 2», ...]. "
+            "Перенос внутри строки пишется как <b>\\n</b> "
             "(два символа: обратный слэш и n), на сайте станет &lt;br&gt;.</p>"
 
             "<p><b>=== Полезно знать ===</b><br/>"
-            "• CSRF-токен обновляется автоматически. Если сессия протухла — программа подтянет новый и повторит запрос.<br/>"
-            "• Закрытие окна во время работы пытается прервать задачу, но 1-2 запроса могут не успеть. "
-            "На сайте останется частично изменённое состояние — очистите «Файл оригинала с сайта» и перезапустите.<br/>"
-            "• Для замены в нескольких книгах: запустите «Заменить» несколько раз, каждый раз с URL новой книги.</p>"
+            "• CSRF-токен обновляется автоматически. Если сессия протухла — "
+            "программа подтянет новый и повторит запрос.<br/>"
+            "• Закрытие окна во время работы пытается прервать задачу, "
+            "но 1-2 запроса могут не успеть. На сайте останется частично "
+            "изменённое состояние — очистите «Файл оригинала с сайта» "
+            "и перезапустите.<br/>"
+            "• Для замены в нескольких книгах: запустите «Заменить» "
+            "несколько раз, каждый раз с URL новой книги.</p>"
 
             "</body></html>"
         )
@@ -1477,7 +2739,9 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
     def _connect(self):
         self.actionRestart.triggered.connect(restart)
         self.actionnotabenoid_org.triggered.connect(self._open_site)
-        self.actionGithub_com.triggered.connect(lambda: webbrowser.open(GITHUB_URL))
+        self.actionGithub_com.triggered.connect(
+            lambda: webbrowser.open(GITHUB_URL)
+        )
         self.actionQuit.triggered.connect(self.close)
 
         self.login.textEdited.connect(self._on_login_edit)
@@ -1490,9 +2754,15 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.logBox.toggled.connect(self.replaceDryCheck.setChecked)
         self.replaceDryCheck.toggled.connect(self.logBox.setChecked)
 
-        self.btnBrowseOld.clicked.connect(lambda: self._pick_file(self.fileNameOld))
-        self.btnBrowseNew.clicked.connect(lambda: self._pick_file(self.fileNameNew))
-        self.btnBrowseTrans.clicked.connect(lambda: self._pick_file(self.fileNameTrans))
+        self.btnBrowseOld.clicked.connect(
+            lambda: self._pick_file(self.fileNameOld)
+        )
+        self.btnBrowseNew.clicked.connect(
+            lambda: self._pick_file(self.fileNameNew)
+        )
+        self.btnBrowseTrans.clicked.connect(
+            lambda: self._pick_file(self.fileNameTrans)
+        )
         self.btnBrowseSave.clicked.connect(self._pick_save)
 
         self.btnFormat.clicked.connect(
@@ -1530,9 +2800,6 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.urlBook.setEnabled(not is_replace)
         self.urlBookText.setEnabled(not is_replace)
 
-        # На вкладках, где dry-run имеет смысл (ADD, REPLACE) — восстанавливаем
-        # сохранённое состояние. На остальных — автоматически снимаем галку,
-        # чтобы кнопки «Начать» были активны.
         if index in (int(Tab.ADD), int(Tab.REPLACE)):
             if self._dry_run_saved and not self.logBox.isChecked():
                 self.logBox.setChecked(True)
@@ -1550,8 +2817,6 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self._update_nt_state()
 
     def _update_nt_state(self):
-        """«Непереведённое» активно только там, где реально используется.
-        Disabled, а не hidden — чтобы layout не сдвигался."""
         tab = self.tabWidget.currentIndex()
         if tab == int(Tab.DOWNLOAD):
             enabled = self.comboBox.currentIndex() == int(DownloadKind.ORIGINAL)
@@ -1563,17 +2828,10 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 
     def _on_dry_run(self):
         dry = self.logBox.isChecked()
-
-        # Запоминаем состояние только когда мы на подходящей вкладке.
-        # На REFRESH/DOWNLOAD/ADD_TRANS галка снимается через _on_tab,
-        # но не должна затирать сохранённое значение.
         current = self.tabWidget.currentIndex()
         if current in (int(Tab.ADD), int(Tab.REPLACE)):
             self._dry_run_saved = dry
 
-        # Кнопки блокируются только на время работы задачи.
-        # В dry-run кнопки на «неподходящих» вкладках уже будут
-        # разблокированы через _on_tab (галка снята).
         running = self.thread is not None and self.thread.isRunning()
         for n in ("btnStartRefresh", "btnStartDownload", "btnStartTrans"):
             getattr(self, n).setDisabled(running)
@@ -1627,6 +2885,12 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         except ValueError as exc:
             QMessageBox.critical(self, "Input error", str(exc))
             return
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "File error",
+                f"Не удалось прочитать файл:\n{exc}",
+            )
+            return
         if state is None:
             return
 
@@ -1638,14 +2902,114 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         self.thread = TaskThread(state)
         self.thread.task_started.connect(self._log)
         self.thread.task_finished.connect(self._log)
-        self.thread.task_finished.connect(lambda _: self._set_running_ui(False))
+        self.thread.task_finished.connect(
+            lambda _: self._set_running_ui(False)
+        )
+        self.thread.finished.connect(self._cleanup_thread)
         self.thread.progress_text.connect(self._log)
         self.thread.progress_value.connect(self._progress)
+        self.thread.request_diff_preview.connect(
+            self._on_request_diff_preview
+        )
+        self.thread.request_replace_preview.connect(
+            self._on_request_replace_preview
+        )
         try:
             self.thread.start()
         except Exception as exc:
             self._set_running_ui(False)
             QMessageBox.critical(self, "Thread error", str(exc))
+
+    def _cleanup_thread(self):
+        t = self.sender()
+        if t is not None:
+            t.deleteLater()
+        if self.thread is t:
+            self.thread = None
+
+    def _on_request_diff_preview(self, payload):
+        # Если почему-то открыт предыдущий диалог — закрываем как «отмену»,
+        # чтобы его воркер не висел на ожидании Event.
+        if self._diff_preview_dlg is not None:
+            try:
+                self._diff_preview_dlg.reject()
+            except RuntimeError:
+                pass
+            self._diff_preview_dlg = None
+
+        confirm_mode = "event" in payload
+
+        try:
+            dlg = DiffPreviewDialog(
+                payload["old"], payload["new"], payload["opcodes"], self,
+                confirm_mode=confirm_mode,
+            )
+        except Exception as exc:
+            _write_log(f"diff preview error: {exc}")
+            self._log(f"Не удалось открыть preview: {exc}")
+            # Разбудить воркер как «отменено», чтобы он не висел.
+            evt = payload.get("event")
+            if evt is not None:
+                payload["result"]["confirmed"] = False
+                evt.set()
+            return
+
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.finished.connect(
+            lambda code, p=payload: self._on_diff_finished(p, code)
+        )
+        dlg.showMaximized()
+        self._diff_preview_dlg = dlg
+
+    def _on_diff_finished(self, payload, code):
+        self._diff_preview_dlg = None
+        evt = payload.get("event")
+        if evt is None:
+            return
+        payload["result"]["confirmed"] = (
+            int(code) == int(QDialog.DialogCode.Accepted)
+        )
+        evt.set()
+
+    def _on_request_replace_preview(self, payload):
+        if self._replace_preview_dlg is not None:
+            try:
+                self._replace_preview_dlg.reject()
+            except RuntimeError:
+                pass
+            self._replace_preview_dlg = None
+
+        confirm_mode = "event" in payload
+
+        try:
+            dlg = ReplacePreviewDialog(
+                payload["entries"], self, confirm_mode=confirm_mode,
+            )
+        except Exception as exc:
+            _write_log(f"replace preview error: {exc}")
+            self._log(f"Не удалось открыть preview: {exc}")
+            evt = payload.get("event")
+            if evt is not None:
+                payload["result"]["confirmed"] = False
+                evt.set()
+            return
+
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dlg.finished.connect(
+            lambda code, p=payload: self._on_replace_finished(p, code)
+        )
+        dlg.showMaximized()
+        self._replace_preview_dlg = dlg
+
+    def _on_replace_finished(self, payload, code):
+        self._replace_preview_dlg = None
+        evt = payload.get("event")
+        if evt is None:
+            return
+        payload["result"]["confirmed"] = (
+            int(code) == int(QDialog.DialogCode.Accepted)
+        )
+        evt.set()
 
     def _build_state(self, tab: Tab) -> Optional[RunState]:
         dry = self.logBox.isChecked()
@@ -1657,6 +3021,13 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
         )
 
         url = self.urlBook.text().strip()
+        url = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        if url.startswith("http://notabenoid.org"):
+            url = url.replace(
+                "http://notabenoid.org", "https://notabenoid.org", 1
+            )
+        if url != self.urlBook.text().strip():
+            self.urlBook.setText(url)
         state.book_url = url
 
         if tab == Tab.ADD:
@@ -1666,7 +3037,8 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
                 raise ValueError("Выберите новый файл оригинала")
             if not url and not (old_path and new_path):
                 raise ValueError(
-                    "Введите URL книги — он нужен, чтобы скачать текущий оригинал с сайта"
+                    "Введите URL книги — он нужен, чтобы скачать "
+                    "текущий оригинал с сайта"
                 )
             state.f1_data = read_lines(old_path) if old_path else []
             state.f2_data = read_lines(new_path)
@@ -1679,10 +3051,7 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
                 main_url = main_url.replace("http://notabenoid.org",
                                             "https://notabenoid.org", 1)
             state.main_url = main_url
-            # strip снимает случайные пробелы и переносы с концов
             state.search_text = self.replace_text_orig.toPlainText().strip()
-            # replacement НЕ strip'им — пользователь может специально
-            # вставить пустую строку или строку с отступами
             state.replacement = self.replacement_text.toPlainText()
             state.replace_entire = self.radioButton_replace.isChecked()
             if not state.main_url:
@@ -1751,11 +3120,24 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
             self.replaceDryCheck.setDisabled(running)
 
     def closeEvent(self, event):
+        if self._diff_preview_dlg is not None:
+            try:
+                self._diff_preview_dlg.close()
+            except RuntimeError:
+                pass
+            self._diff_preview_dlg = None
+        if self._replace_preview_dlg is not None:
+            try:
+                self._replace_preview_dlg.close()
+            except RuntimeError:
+                pass
+            self._replace_preview_dlg = None
         if self.thread and self.thread.isRunning():
             self.thread.stop()
             self.thread.wait(2000)
         if self.radioButton_url.isChecked() and self.urlBook.text().strip():
             self.config.save_url(self.urlBook.text().strip())
+        _flush_log()
         event.accept()
 
 
@@ -1763,22 +3145,18 @@ class MainWindow(QMainWindow, design.Ui_MainWindow):
 # misc
 # --------------------------------------------------------------------------- #
 
-def _write_log(text: str):
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(text.rstrip() + "\n")
-    except OSError:
-        pass
-
-
 def restart():
-    os.execl(sys.executable, os.path.abspath(__file__), *sys.argv)
+    if getattr(sys, "frozen", False):
+        os.execl(sys.executable, sys.executable, *sys.argv[1:])
+    else:
+        os.execl(sys.executable, sys.executable,
+                 os.path.abspath(__file__), *sys.argv[1:])
 
 
 if __name__ == "__main__":
+    freeze_support()
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    freeze_support()
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
