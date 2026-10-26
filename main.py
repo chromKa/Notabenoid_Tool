@@ -441,7 +441,7 @@ class SiteClient:
                                 f"нумерация последующих строк могла сбиться.")
                         return fail_count + 1
 
-                current_body = _extract_ptext(p).rstrip()
+                current_body = _extract_ptext(p)
 
                 url = f"{self.book_url}/{rid}/edit"
                 data = {"ord": ordinal, "body": current_body}
@@ -2047,7 +2047,7 @@ class TaskThread(QThread):
                     continue
                 p = row.find("p", class_="text")
                 if p:
-                    result.append(_extract_ptext(p).rstrip())
+                    result.append(_extract_ptext(p))
             self.progress_value.emit(int(100 * page / last))
         return result, failed
 
@@ -2079,15 +2079,15 @@ class TaskThread(QThread):
                     if best:
                         p = best.find("p", class_="text")
                         if p:
-                            result.append(_extract_ptext(p).rstrip())
+                            result.append(_extract_ptext(p))
                             continue
                 if texts:
-                    result.append(_extract_ptext(texts[0]).rstrip())
+                    result.append(_extract_ptext(texts[0]))
                 elif self.state.insert_from_original:
                     o_cell = row.find(class_="o")
                     p = o_cell.find("p", class_="text") if o_cell else None
                     if p:
-                        result.append(_extract_ptext(p).rstrip())
+                        result.append(_extract_ptext(p))
                 else:
                     result.append("")
             self.progress_value.emit(int(100 * page / last))
@@ -2451,7 +2451,7 @@ class TaskThread(QThread):
                     if p:
                         result.append(
                             (orig_id, div_id[1:],
-                             _extract_ptext(p).rstrip())
+                             _extract_ptext(p))
                         )
         return title, result
 
